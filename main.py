@@ -5,6 +5,17 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 
+def read_upload_bytes(b: bytes, filename: str):
+    import os, io
+    ext = os.path.splitext(filename or "")[1].lower()
+    if ext == ".csv":
+        df = pd.read_csv(io.BytesIO(b))
+    elif ext in {".xlsx", ".xls"}:
+        df = pd.read_excel(io.BytesIO(b))
+    else:
+        raise ValueError("Endast CSV, XLSX och XLS stöds.")
+    return df, b
+
 from app.schemas import (
     SignupRequest,
     LoginRequest,
