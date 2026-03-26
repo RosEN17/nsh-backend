@@ -1,0 +1,12 @@
+.venv
+__pycache__
+.env
+.env.local
+.env.development
+.env.production
+.env.test
+.next/
+out/
+pycache/
+*.pyc
+.DS_Store
