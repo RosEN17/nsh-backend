@@ -99,7 +99,10 @@ def login(payload: LoginRequest):
 
 @app.post("/api/analyze")
 async def analyze(file: UploadFile = File(...)):
-    df, _ = read_upload(file.file)
+    try:
+        df, _ = read_upload(file.file)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     suggestions = infer_candidate_columns(df)
     return {
         "available_columns": list(df.columns),
