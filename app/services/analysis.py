@@ -186,7 +186,7 @@ def read_upload(file) -> Tuple[pd.DataFrame, bytes]:
         b = file.getvalue()
     except Exception:
         try:
-            b = file.file.read()
+            b = file.read()
         except Exception:
             b = file.read()
 
