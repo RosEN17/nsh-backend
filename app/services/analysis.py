@@ -179,16 +179,10 @@ def month_add(period_yyyy_mm: str, delta_months: int) -> Optional[str]:
 
 
 def read_upload(file) -> Tuple[pd.DataFrame, bytes]:
-    """
-    Fungerar både med Streamlit-liknande file-objekt och FastAPI UploadFile.
-    """
     try:
         b = file.getvalue()
     except Exception:
-        try:
-            b = file.read()
-        except Exception:
-            b = file.read()
+        b = file.read()
 
     file_name = getattr(file, "name", None) or getattr(file, "filename", "")
     ext = os.path.splitext(file_name)[1].lower()
