@@ -125,16 +125,16 @@ async def analyze(file: UploadFile = File(...)):
 @app.post("/api/analyze-with-mapping")
 async def analyze_with_mapping(
     file: UploadFile = File(...),
-    mappingjson: str = Form(...),
+    mapping_json: str = Form(...),
 ):
     contents = await file.read()
-    df,  = read_upload_bytes(contents, file.filename)
+    df, _ = read_upload_bytes(contents, file.filename)
     mapping_data = json.loads(mapping_json)
-    mapping = Mapping(mapping_data)
+    mapping = Mapping(**mapping_data)
     model_df = build_model_df(df, mapping)
     pack = compute_variances(model_df)
     return {
-        pack_to_dict(pack),
+        **pack_to_dict(pack),
         "available_columns": list(df.columns),
         "column_suggestions": infer_candidate_columns(df),
     }
