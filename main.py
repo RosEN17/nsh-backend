@@ -100,7 +100,8 @@ def login(payload: LoginRequest):
 @app.post("/api/analyze")
 async def analyze(file: UploadFile = File(...)):
     try:
-        df, _ = read_upload(file)
+        contents = await file.read()
+        df, _ = read_upload_bytes(contents, file.filename)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
     suggestions = infer_candidate_columns(df)
@@ -113,16 +114,16 @@ async def analyze(file: UploadFile = File(...)):
 @app.post("/api/analyze-with-mapping")
 async def analyze_with_mapping(
     file: UploadFile = File(...),
-    mapping_json: str = Form(...),
+    mappingjson: str = Form(...),
 ):
-    df, _ = read_upload(file)
+    contents = await file.read()
+    df,  = read_upload_bytes(contents, file.filename)
     mapping_data = json.loads(mapping_json)
-    mapping = Mapping(**mapping_data)
+    mapping = Mapping(mapping_data)
     model_df = build_model_df(df, mapping)
     pack = compute_variances(model_df)
-
     return {
-        **pack_to_dict(pack),
+        pack_to_dict(pack),
         "available_columns": list(df.columns),
         "column_suggestions": infer_candidate_columns(df),
     }
