@@ -100,7 +100,7 @@ def login(payload: LoginRequest):
 @app.post("/api/analyze")
 async def analyze(file: UploadFile = File(...)):
     try:
-        df, _ = read_upload(file.file)
+        df, _ = read_upload(file)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
     suggestions = infer_candidate_columns(df)
@@ -115,7 +115,7 @@ async def analyze_with_mapping(
     file: UploadFile = File(...),
     mapping_json: str = Form(...),
 ):
-    df, _ = read_upload(file.file)
+    df, _ = read_upload(file)
     mapping_data = json.loads(mapping_json)
     mapping = Mapping(**mapping_data)
     model_df = build_model_df(df, mapping)
