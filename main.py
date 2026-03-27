@@ -52,7 +52,7 @@ app = FastAPI(title="NordSheet API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"https://nsh-frontend.*\.vercel\.app|http://localhost:3000",
+    allow_origin_regex=r"https://.*nordsheet\.com|https://nsh-frontend.*\.vercel\.app|http://localhost:3000",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
