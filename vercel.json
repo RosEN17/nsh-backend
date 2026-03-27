@@ -1,20 +1,16 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "builds": [
-    {
-      "src": "main.py",
-      "use": "@vercel/python",
-      "config": {
-        "maxLambdaSize": "50mb"
-      }
+  "functions": {
+    "main.py": {
+      "runtime": "vercel-python@4.3.0"
     }
-  ],
+  },
   "routes": [
     {
       "src": "/(.*)",
       "dest": "main.py",
       "headers": {
-        "Access-Control-Allow-Origin": "https://nsh-frontend.vercel.app",
+        "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type, Authorization"
       }
