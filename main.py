@@ -943,6 +943,98 @@ async def analyze(file: UploadFile = File(...)):
     }
 
 
+@app.post("/api/ai-map")
+async def ai_map(file: UploadFile = File(...)):
+    """
+    Reads the file and uses OpenAI to intelligently map columns.
+    Returns both the AI mapping and the keyword-based fallback.
+    """
+    try:
+        contents = await file.read()
+        df = read_upload_bytes(contents, file.filename or "")
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Kunde inte läsa filen: {e}")
+
+    cols = list(df.columns)
+    preview = df.head(5).fillna("").to_dict(orient="records")
+    keyword_suggestions = suggest_columns(cols)
+
+    openai_key = os.getenv("OPENAI_API_KEY")
+    ai_mapping = None
+
+    if openai_key:
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=openai_key)
+
+            prompt = f"""Du är en expert på finansiell data. Analysera dessa kolumnnamn och förhandsvisning från en Excel/CSV-fil och mappa dem till rätt finansiella fält.
+
+Kolumner: {json.dumps(cols, ensure_ascii=False)}
+
+Förhandsvisning (5 rader):
+{json.dumps(preview, ensure_ascii=False)}
+
+Mappa till dessa fält (returnera null om ingen lämplig kolumn finns):
+- period: kolumn med datum/period/månad
+- account: kolumn med kontonummer
+- account_name: kolumn med kontonamn/beskrivning
+- actual: kolumn med faktiskt utfall/belopp
+- budget: kolumn med budgeterat belopp
+- entity: kolumn med bolag/enhet
+- cost_center: kolumn med kostnadsställe
+- project: kolumn med projekt
+
+Returnera ENDAST giltig JSON utan förklaringar:
+{{"period": "kolumnnamn eller null", "account": "kolumnnamn eller null", "account_name": "kolumnnamn eller null", "actual": "kolumnnamn eller null", "budget": "kolumnnamn eller null", "entity": "kolumnnamn eller null", "cost_center": "kolumnnamn eller null", "project": "kolumnnamn eller null"}}"""
+
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=300,
+                temperature=0,
+            )
+            raw = resp.choices[0].message.content or "{}"
+            raw = re.sub(r"```json|```", "", raw).strip()
+            ai_mapping = json.loads(raw)
+
+            # Validate that mapped columns actually exist
+            for field, col in ai_mapping.items():
+                if col and col not in cols:
+                    ai_mapping[field] = None
+
+        except Exception as e:
+            ai_mapping = None
+
+    # Build final mapping: AI first, keyword fallback
+    fields = ["period", "account", "account_name", "actual", "budget", "entity", "cost_center", "project"]
+    final_mapping = {}
+    mapping_source = {}
+
+    for field in fields:
+        ai_val = (ai_mapping or {}).get(field)
+        kw_val = keyword_suggestions.get(field, [None])[0] if keyword_suggestions.get(field) else None
+
+        if ai_val:
+            final_mapping[field] = ai_val
+            mapping_source[field] = "ai"
+        elif kw_val:
+            final_mapping[field] = kw_val
+            mapping_source[field] = "keyword"
+        else:
+            final_mapping[field] = ""
+            mapping_source[field] = "none"
+
+    return {
+        "available_columns": cols,
+        "column_suggestions": keyword_suggestions,
+        "mapping": final_mapping,
+        "mapping_source": mapping_source,
+        "ai_used": ai_mapping is not None,
+        "row_count": len(df),
+        "preview": preview,
+    }
+
+
 @app.post("/api/analyze-with-mapping")
 async def analyze_with_mapping(
     file: UploadFile = File(...),
