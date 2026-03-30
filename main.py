@@ -1295,34 +1295,86 @@ class ChatRequest(BaseModel):
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
     openai_key = os.getenv("OPENAI_API_KEY")
+    pack = req.pack or {}
+
+    # Detect if this is a variance analysis request (has structured 4-point format)
+    is_variance_analysis = all(k in req.question for k in ["ORSAK", "TYP", "ÅTGÄRD", "PROGNOS"])
+
     if openai_key:
         try:
             from openai import OpenAI
             client = OpenAI(api_key=openai_key)
-            system = (
-                "Du är en senior finansanalytiker på NordSheet. Svara kort och konkret på svenska. "
-                f"Analysdata: {json.dumps(req.pack, ensure_ascii=False)}"
-            )
-            resp = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user",   "content": req.question},
-                ],
-                max_tokens=500,
-            )
+
+            if is_variance_analysis:
+                # Deep variance analysis — structured, specific, actionable
+                system = """Du är en senior finanscontroller med 15 års erfarenhet.
+Du analyserar avvikelser med precision och ger konkreta, handlingsbara svar.
+
+Regler:
+- Svara ALLTID på svenska
+- Svara strukturerat med exakt de rubriker användaren angett (1. ORSAK, 2. TYP, 3. ÅTGÄRD, 4. PROGNOS)
+- Var specifik — undvik generella fraser som "kan bero på"
+- Max 2 meningar per punkt
+- För TYP: basera på om mönstret är synligt i historiken
+- För PROGNOS: räkna ut helårssiffran om avvikelsen är återkommande
+- Använd siffror från datan, inte vaga uppskattningar"""
+
+                # Build context from pack
+                period_series = pack.get("period_series", [])
+                history_str = ""
+                if period_series:
+                    history_str = "\n".join([
+                        f"  {p.get('period','?')}: utfall {p.get('actual',0):,.0f}, budget {p.get('budget',0):,.0f}"
+                        for p in period_series[-6:]
+                    ])
+
+                context = f"""Finansiell kontext:
+- Aktuell period: {pack.get('current_period', '?')}
+- Föregående period: {pack.get('previous_period', '?')}
+- Totalt utfall: {pack.get('total_actual', 0):,.0f}
+- Total budget: {pack.get('total_budget', 0):,.0f}
+{f'Periodhistorik (senaste 6):{chr(10)}{history_str}' if history_str else ''}"""
+
+                resp = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system",  "content": system},
+                        {"role": "user",    "content": f"{context}\n\n{req.question}"},
+                    ],
+                    max_tokens=600,
+                    temperature=0.1,
+                )
+            else:
+                # General chat about financials
+                system = (
+                    "Du är en senior finansanalytiker på NordSheet. "
+                    "Svara kort, konkret och på svenska. Använd siffror från datan. "
+                    f"Finansdata: period={pack.get('current_period','?')}, "
+                    f"utfall={pack.get('total_actual',0):,.0f}, "
+                    f"budget={pack.get('total_budget',0):,.0f}"
+                )
+                resp = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user",   "content": req.question},
+                    ],
+                    max_tokens=400,
+                    temperature=0.2,
+                )
+
             return {"answer": resp.choices[0].message.content}
         except Exception as e:
             return {"answer": f"AI-fel: {e}"}
 
-    pack = req.pack or {}
-    q    = req.question.lower()
-    if any(w in q for w in ["utfall","actual","total"]):
-        return {"answer": f"Totalt utfall: {fmt_sek(float(pack.get('total_actual',0)))}"}
+    # Fallback without OpenAI key
+    q = req.question.lower()
+    if any(w in q for w in ["utfall", "actual", "total"]):
+        return {"answer": f"Totalt utfall: {fmt_sek(float(pack.get('total_actual', 0)))}"}
     if "budget" in q:
-        return {"answer": f"Total budget: {fmt_sek(float(pack.get('total_budget',0)))}"}
+        return {"answer": f"Total budget: {fmt_sek(float(pack.get('total_budget', 0)))}"}
     if "period" in q:
-        return {"answer": f"Aktuell period: {pack.get('current_period','N/A')}"}
+        return {"answer": f"Aktuell period: {pack.get('current_period', 'N/A')}"}
     return {"answer": pack.get("narrative", "Ingen data tillgänglig.")}
 
 
