@@ -1634,7 +1634,7 @@ Faktura:
         except Exception as e:
             results.append({"file": filename, "error": str(e)})
 
-    logger.info(f"Inbound invoice from {from_email}: {len(results)} PDFs processed")
+    print(f"Inbound invoice from {from_email}: {len(results)} PDFs processed")
     return {"ok": True, "processed": len(results), "results": results}
 
 @app.post("/api/export")
