@@ -1385,6 +1385,169 @@ class ExportRequest(BaseModel):
     spec:          dict = {}
     purpose:       str  = ""
     business_type: str  = ""
+"""
+Fakturaanalys-endpoint.
+Klistra in detta block i main.py, direkt efter /api/chat-endpointen.
+
+Kräver att 'pypdf' eller 'pdfplumber' finns i requirements.txt.
+Lägg till: pdfplumber>=0.10.3
+"""
+
+
+@app.post("/api/analyze-invoice")
+async def analyze_invoice(file: UploadFile = File(...)):
+    """
+    Tar emot en PDF-faktura, extraherar text och skickar till OpenAI
+    för strukturerad analys. Returnerar leverantör, belopp, rader och
+    AI-flaggade avvikelser.
+    """
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=422, detail="Endast PDF-filer stöds.")
+
+    try:
+        contents = await file.read()
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Kunde inte läsa filen: {e}")
+
+    # ── Extrahera text från PDF ──
+    pdf_text = ""
+    try:
+        import pdfplumber, io as _io
+        with pdfplumber.open(_io.BytesIO(contents)) as pdf:
+            pages = []
+            for page in pdf.pages[:6]:  # max 6 sidor
+                t = page.extract_text()
+                if t:
+                    pages.append(t)
+            pdf_text = "\n\n".join(pages)
+    except ImportError:
+        # Fallback: pypdf
+        try:
+            from pypdf import PdfReader
+            import io as _io
+            reader = PdfReader(_io.BytesIO(contents))
+            pdf_text = "\n\n".join(
+                page.extract_text() or ""
+                for page in reader.pages[:6]
+            )
+        except ImportError:
+            raise HTTPException(
+                status_code=500,
+                detail="pdfplumber eller pypdf saknas. Lägg till i requirements.txt."
+            )
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"Kunde inte läsa PDF: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"PDF-extraktion misslyckades: {e}")
+
+    if not pdf_text.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="Kunde inte extrahera text från PDF. Filen kan vara skannad eller skyddad."
+        )
+
+    # Begränsa textstorlek
+    pdf_text = pdf_text[:6000]
+
+    # ── AI-analys ──
+    openai_key = os.getenv("OPENAI_API_KEY")
+
+    fallback_result = {
+        "supplier":       "Okänd",
+        "invoice_number": "",
+        "invoice_date":   "",
+        "due_date":       "",
+        "total_amount":   None,
+        "vat_amount":     None,
+        "net_amount":     None,
+        "currency":       "SEK",
+        "line_items":     [],
+        "ai_summary":     "AI-analys ej tillgänglig — OPENAI_API_KEY saknas.",
+        "anomalies":      [],
+        "category":       "Okänd",
+        "confidence":     0.5,
+    }
+
+    if not openai_key:
+        return fallback_result
+
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=openai_key)
+
+        prompt = f"""Du är en expert på fakturaanalys. Analysera denna faktura och returnera ENDAST giltig JSON.
+
+Fakturatextinnehåll:
+---
+{pdf_text}
+---
+
+Returnera JSON med exakt dessa fält:
+{{
+  "supplier": "leverantörens namn",
+  "invoice_number": "fakturanummer",
+  "invoice_date": "YYYY-MM-DD eller tom sträng",
+  "due_date": "YYYY-MM-DD eller tom sträng",
+  "total_amount": 1234.56 (number eller null),
+  "vat_amount": 123.45 (number eller null),
+  "net_amount": 1111.11 (number eller null),
+  "currency": "SEK",
+  "category": "t.ex. Konsulttjänster / IT / Hyra / Transport / Övrigt",
+  "line_items": [
+    {{"description": "...", "amount": 100.0, "quantity": 1}}
+  ],
+  "anomalies": [
+    "Beskriv avvikelser här t.ex. saknat org.nr, ovanligt högt belopp, förfallet datum"
+  ],
+  "ai_summary": "2-3 meningar på svenska om fakturan — vad den avser, om den ser korrekt ut och vad controllern bör tänka på",
+  "confidence": 0.85
+}}
+
+Regler:
+- Alla belopp som number (inte sträng)
+- Datum alltid YYYY-MM-DD format
+- anomalies: lista verkliga avvikelser du hittar — saknat org.nr, förfallodatum passerat, moms ser fel ut, dublett-risk etc.
+- Om du inte kan hitta ett värde, använd null för tal och tom sträng för text
+- Returnera BARA JSON, inga förklaringar"""
+
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Du är expert på fakturaanalys. Returnera alltid giltig JSON."},
+                {"role": "user",   "content": prompt},
+            ],
+            max_tokens=1000,
+            temperature=0.1,
+        )
+
+        raw = resp.choices[0].message.content or "{}"
+        raw = re.sub(r"```json|```", "", raw).strip()
+
+        try:
+            result = json.loads(raw)
+        except Exception:
+            m = re.search(r"\{.*\}", raw, re.DOTALL)
+            result = json.loads(m.group(0)) if m else {}
+
+        # Säkerställ att alla fält finns
+        for key, default in fallback_result.items():
+            if key not in result:
+                result[key] = default
+
+        # Säkerställ att numeriska fält verkligen är numbers eller null
+        for num_field in ["total_amount", "vat_amount", "net_amount"]:
+            val = result.get(num_field)
+            if val is not None:
+                try:
+                    result[num_field] = float(val)
+                except (TypeError, ValueError):
+                    result[num_field] = None
+
+        return result
+
+    except Exception as e:
+        fallback_result["ai_summary"] = f"AI-analys misslyckades: {str(e)}"
+        return fallback_result
 
 
 @app.post("/api/export")
