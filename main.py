@@ -1477,6 +1477,8 @@ async def analyze_invoice(file: UploadFile = File(...)):
 
         prompt = f"""Du är en expert på fakturaanalys. Analysera denna faktura och returnera ENDAST giltig JSON.
 
+
+
 Fakturatextinnehåll:
 ---
 {pdf_text}
@@ -1548,7 +1550,98 @@ Regler:
     except Exception as e:
         fallback_result["ai_summary"] = f"AI-analys misslyckades: {str(e)}"
         return fallback_result
+@app.post("/api/invoice-inbound")
+async def invoice_inbound(request: Request):
+    """
+    Postmark skickar hit när ett mail kommer in till er inbound-adress.
+    Extraherar PDF-bilagor och kör fakturaanalys automatiskt.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return {"ok": False, "error": "invalid json"}
 
+    attachments = data.get("Attachments", [])
+    from_email  = data.get("From", "")
+    subject     = data.get("Subject", "")
+
+    results = []
+
+    for attachment in attachments:
+        filename    = attachment.get("Name", "")
+        content_b64 = attachment.get("Content", "")
+        content_type = attachment.get("ContentType", "")
+
+        # Bara PDF-bilagor
+        if not (filename.lower().endswith(".pdf") or "pdf" in content_type.lower()):
+            continue
+
+        try:
+            import base64, io as _io
+            pdf_bytes = base64.b64decode(content_b64)
+
+            # Extrahera text
+            pdf_text = ""
+            try:
+                import pdfplumber
+                with pdfplumber.open(_io.BytesIO(pdf_bytes)) as pdf:
+                    pdf_text = "\n\n".join(
+                        p.extract_text() or ""
+                        for p in pdf.pages[:6]
+                    )
+            except Exception:
+                pass
+
+            if not pdf_text.strip():
+                results.append({"file": filename, "error": "Ingen text i PDF"})
+                continue
+
+            # Kör AI-analys (återanvänd samma logik)
+            openai_key = os.getenv("OPENAI_API_KEY")
+            if openai_key:
+                from openai import OpenAI
+                client = OpenAI(api_key=openai_key)
+                prompt = f"""Analysera denna faktura och returnera JSON:
+{{
+  "supplier": "...",
+  "invoice_number": "...",
+  "invoice_date": "YYYY-MM-DD",
+  "due_date": "YYYY-MM-DD",
+  "total_amount": 0.0,
+  "vat_amount": 0.0,
+  "net_amount": 0.0,
+  "currency": "SEK",
+  "category": "...",
+  "line_items": [],
+  "anomalies": [],
+  "ai_summary": "...",
+  "confidence": 0.9
+}}
+
+Faktura:
+{pdf_text[:4000]}"""
+
+                resp = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=800,
+                    temperature=0.1,
+                )
+                raw = re.sub(r"```json|```", "",
+                    resp.choices[0].message.content or "{}").strip()
+                analysis = json.loads(raw)
+                results.append({
+                    "file":     filename,
+                    "from":     from_email,
+                    "subject":  subject,
+                    "analysis": analysis,
+                })
+
+        except Exception as e:
+            results.append({"file": filename, "error": str(e)})
+
+    logger.info(f"Inbound invoice from {from_email}: {len(results)} PDFs processed")
+    return {"ok": True, "processed": len(results), "results": results}
 
 @app.post("/api/export")
 async def export_file(req: ExportRequest):
