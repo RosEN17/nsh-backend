@@ -10,3 +10,4 @@ openai>=1.30.0
 python-dotenv>=1.0.0
 email-validator>=2.1.0
 lxml>=5.2.0
+pdfplumber>=0.10.3
