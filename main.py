@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -1385,13 +1385,7 @@ class ExportRequest(BaseModel):
     spec:          dict = {}
     purpose:       str  = ""
     business_type: str  = ""
-"""
-Fakturaanalys-endpoint.
-Klistra in detta block i main.py, direkt efter /api/chat-endpointen.
 
-Kräver att 'pypdf' eller 'pdfplumber' finns i requirements.txt.
-Lägg till: pdfplumber>=0.10.3
-"""
 
 
 @app.post("/api/analyze-invoice")
