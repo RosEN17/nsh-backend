@@ -1634,6 +1634,51 @@ Faktura:
         except Exception as e:
             results.append({"file": filename, "error": str(e)})
 
+    # Spara till Supabase Storage + databas
+    supabase_url = os.getenv("SUPABASE_URL", "")
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    if supabase_url and supabase_key:
+        try:
+            from supabase import create_client as _sb_create
+            import base64 as _b64
+            _sb = _sb_create(supabase_url, supabase_key)
+            for idx, attachment in enumerate(attachments):
+                filename     = attachment.get("Name", "")
+                content_b64  = attachment.get("Content", "")
+                content_type = attachment.get("ContentType", "")
+                if not (filename.lower().endswith(".pdf") or "pdf" in content_type.lower()):
+                    continue
+                pdf_bytes    = _b64.b64decode(content_b64)
+                invoice_id   = str(__import__("uuid").uuid4())
+                storage_path = f"inbound/{invoice_id}/{filename}"
+                # Ladda upp PDF till Storage
+                try:
+                    _sb.storage.from_("invoices").upload(
+                        storage_path, pdf_bytes,
+                        {"content-type": "application/pdf"}
+                    )
+                except Exception as _se:
+                    print(f"Storage upload failed: {_se}")
+                    storage_path = None
+                # Hämta analys från results
+                analysis = None
+                for r in results:
+                    if r.get("file") == filename and "analysis" in r:
+                        analysis = r["analysis"]
+                        break
+                # Spara i databasen
+                _sb.table("inbound_invoices").insert({
+                    "id":           invoice_id,
+                    "from_email":   from_email,
+                    "subject":      subject,
+                    "filename":     filename,
+                    "storage_path": storage_path,
+                    "analysis":     analysis,
+                    "status":       "new",
+                }).execute()
+        except Exception as _e:
+            print(f"Supabase save failed: {_e}")
+
     print(f"Inbound invoice from {from_email}: {len(results)} PDFs processed")
     return {"ok": True, "processed": len(results), "results": results}
 
