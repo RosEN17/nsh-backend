@@ -1547,137 +1547,139 @@ Regler:
 @app.post("/api/invoice-inbound")
 async def invoice_inbound(request: Request):
     """
-    Postmark skickar hit när ett mail kommer in till er inbound-adress.
-    Extraherar PDF-bilagor och kör fakturaanalys automatiskt.
+    Postmark webhook — tar emot mail med PDF-bilagor,
+    kör AI-analys och sparar till Supabase.
     """
     try:
         data = await request.json()
     except Exception:
         return {"ok": False, "error": "invalid json"}
 
-    attachments = data.get("Attachments", [])
-    from_email  = data.get("From", "")
-    subject     = data.get("Subject", "")
+    attachments  = data.get("Attachments", [])
+    from_email   = data.get("From", "")
+    subject      = data.get("Subject", "")
+    results      = []
 
-    results = []
+    supabase_url = os.getenv("SUPABASE_URL", "")
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    openai_key   = os.getenv("OPENAI_API_KEY", "")
+
+    _sb = None
+    if supabase_url and supabase_key:
+        try:
+            from supabase import create_client as _sb_create
+            _sb = _sb_create(supabase_url, supabase_key)
+        except Exception as _e:
+            print(f"Supabase init failed: {_e}")
 
     for attachment in attachments:
-        filename    = attachment.get("Name", "")
-        content_b64 = attachment.get("Content", "")
+        filename     = attachment.get("Name", "")
+        content_b64  = attachment.get("Content", "")
         content_type = attachment.get("ContentType", "")
 
-        # Bara PDF-bilagor
         if not (filename.lower().endswith(".pdf") or "pdf" in content_type.lower()):
             continue
 
         try:
-            import base64, io as _io
-            pdf_bytes = base64.b64decode(content_b64)
+            import base64 as _b64, io as _io
+            pdf_bytes = _b64.b64decode(content_b64)
 
-            # Extrahera text
+            # ── Extrahera text ──
             pdf_text = ""
             try:
                 import pdfplumber
-                with pdfplumber.open(_io.BytesIO(pdf_bytes)) as pdf:
+                with pdfplumber.open(_io.BytesIO(pdf_bytes)) as _pdf:
                     pdf_text = "\n\n".join(
-                        p.extract_text() or ""
-                        for p in pdf.pages[:6]
+                        p.extract_text() or "" for p in _pdf.pages[:6]
                     )
-            except Exception:
-                pass
+            except Exception as _pe:
+                print(f"PDF extract error: {_pe}")
 
-            if not pdf_text.strip():
-                results.append({"file": filename, "error": "Ingen text i PDF"})
-                continue
-
-            # Kör AI-analys (återanvänd samma logik)
-            openai_key = os.getenv("OPENAI_API_KEY")
-            if openai_key:
-                from openai import OpenAI
-                client = OpenAI(api_key=openai_key)
-                prompt = f"""Analysera denna faktura och returnera JSON:
+            # ── AI-analys ──
+            analysis = None
+            if pdf_text.strip() and openai_key:
+                try:
+                    from openai import OpenAI as _OAI
+                    _client = _OAI(api_key=openai_key)
+                    _prompt = f"""Du är expert på fakturaanalys. Analysera denna faktura och returnera ENDAST giltig JSON utan backticks:
 {{
-  "supplier": "...",
-  "invoice_number": "...",
+  "supplier": "leverantorens namn",
+  "invoice_number": "fakturanummer",
   "invoice_date": "YYYY-MM-DD",
   "due_date": "YYYY-MM-DD",
   "total_amount": 0.0,
   "vat_amount": 0.0,
   "net_amount": 0.0,
   "currency": "SEK",
-  "category": "...",
-  "line_items": [],
-  "anomalies": [],
-  "ai_summary": "...",
+  "category": "Konsulttjanster",
+  "line_items": [{{"description": "...", "amount": 0.0, "quantity": 1}}],
+  "anomalies": ["beskriv avvikelser har"],
+  "ai_summary": "2-3 meningar pa svenska om fakturan",
   "confidence": 0.9
 }}
 
 Faktura:
 {pdf_text[:4000]}"""
+                    _resp = _client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[
+                            {"role": "system", "content": "Du ar expert pa fakturaanalys. Returnera ALLTID bara JSON."},
+                            {"role": "user", "content": _prompt}
+                        ],
+                        max_tokens=1000,
+                        temperature=0.1,
+                    )
+                    _raw = re.sub(r"```json|```", "",
+                        _resp.choices[0].message.content or "{}").strip()
+                    analysis = json.loads(_raw)
+                    print(f"AI analysis done for {filename}: {analysis.get('supplier','?')}")
+                except Exception as _ae:
+                    print(f"AI analysis failed for {filename}: {_ae}")
+            else:
+                if not pdf_text.strip():
+                    print(f"No text extracted from {filename}")
+                if not openai_key:
+                    print("OPENAI_API_KEY missing")
 
-                resp = client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=800,
-                    temperature=0.1,
-                )
-                raw = re.sub(r"```json|```", "",
-                    resp.choices[0].message.content or "{}").strip()
-                analysis = json.loads(raw)
-                results.append({
-                    "file":     filename,
-                    "from":     from_email,
-                    "subject":  subject,
-                    "analysis": analysis,
-                })
+            # ── Spara till Supabase ──
+            invoice_id   = str(__import__("uuid").uuid4())
+            storage_path = None
 
-        except Exception as e:
-            results.append({"file": filename, "error": str(e)})
-
-    # Spara till Supabase Storage + databas
-    supabase_url = os.getenv("SUPABASE_URL", "")
-    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
-    if supabase_url and supabase_key:
-        try:
-            from supabase import create_client as _sb_create
-            import base64 as _b64
-            _sb = _sb_create(supabase_url, supabase_key)
-            for idx, attachment in enumerate(attachments):
-                filename     = attachment.get("Name", "")
-                content_b64  = attachment.get("Content", "")
-                content_type = attachment.get("ContentType", "")
-                if not (filename.lower().endswith(".pdf") or "pdf" in content_type.lower()):
-                    continue
-                pdf_bytes    = _b64.b64decode(content_b64)
-                invoice_id   = str(__import__("uuid").uuid4())
-                storage_path = f"inbound/{invoice_id}/{filename}"
+            if _sb:
                 # Ladda upp PDF till Storage
                 try:
+                    _sp = f"inbound/{invoice_id}/{filename}"
                     _sb.storage.from_("invoices").upload(
-                        storage_path, pdf_bytes,
-                        {"content-type": "application/pdf"}
+                        _sp, pdf_bytes, {"content-type": "application/pdf"}
                     )
-                except Exception as _se:
-                    print(f"Storage upload failed: {_se}")
-                    storage_path = None
-                # Hämta analys från results
-                analysis = None
-                for r in results:
-                    if r.get("file") == filename and "analysis" in r:
-                        analysis = r["analysis"]
-                        break
-                # Spara i databasen
-                _sb.table("inbound_invoices").insert({
-                    "id":           invoice_id,
-                    "from_email":   from_email,
-                    "subject":      subject,
-                    "filename":     filename,
-                    "storage_path": storage_path,
-                    "analysis":     analysis,
-                    "status":       "new",
-                }).execute()
-        except Exception as _e:
-            print(f"Supabase save failed: {_e}")
+                    storage_path = _sp
+                except Exception as _ue:
+                    print(f"Storage upload failed: {_ue}")
+
+                # Spara i databasen med analys
+                try:
+                    _sb.table("inbound_invoices").insert({
+                        "id":           invoice_id,
+                        "from_email":   from_email,
+                        "subject":      subject,
+                        "filename":     filename,
+                        "storage_path": storage_path,
+                        "analysis":     analysis,
+                        "status":       "new",
+                    }).execute()
+                    print(f"Saved to Supabase: {invoice_id}, analysis={'yes' if analysis else 'NO'}")
+                except Exception as _dbe:
+                    print(f"DB insert failed: {_dbe}")
+
+            results.append({
+                "file":     filename,
+                "analysis": analysis,
+                "saved":    _sb is not None,
+            })
+
+        except Exception as e:
+            print(f"Error processing {filename}: {e}")
+            results.append({"file": filename, "error": str(e)})
 
     print(f"Inbound invoice from {from_email}: {len(results)} PDFs processed")
     return {"ok": True, "processed": len(results), "results": results}
