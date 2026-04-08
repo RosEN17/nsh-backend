@@ -515,21 +515,23 @@ async def fortnox_sync(req: FortnoxSyncRequest):
     current_period = periods[-1] if periods else "Unknown"
     previous_period = periods[-2] if len(periods) >= 2 else None
 
-    total_actual = float(by_account["actual"].sum())
+    # Total actual = current period only (not all periods summed)
+    cur_period_rows = df[df["period"] == current_period]
+    total_actual = float(cur_period_rows["actual"].sum()) if not cur_period_rows.empty else float(by_account["actual"].sum())
+    prev_total_actual = float(df[df["period"] == previous_period]["actual"].sum()) if previous_period else 0
 
-    # Period series (tidsserier)
+    # Period series — per period summering
     period_series = []
     for p in periods:
-        p_sum = float(df[df["period"] == p]["actual"].sum())
+        p_df  = df[df["period"] == p]
+        p_sum = float(p_df["actual"].sum())
         period_series.append({"period": p, "actual": round(p_sum, 0), "budget": 0})
 
     # MoM
     mom_diff, mom_pct = None, None
-    if previous_period:
-        cur_total = float(df[df["period"] == current_period]["actual"].sum())
-        prev_total = float(df[df["period"] == previous_period]["actual"].sum())
-        mom_diff = cur_total - prev_total
-        mom_pct = (cur_total - prev_total) / abs(prev_total) if prev_total != 0 else None
+    if previous_period and prev_total_actual != 0:
+        mom_diff = total_actual - prev_total_actual
+        mom_pct  = mom_diff / abs(prev_total_actual)
 
     # ── 4) Smarter variance detection med MoM-jämförelse ────────
     # Bygg per-period lookup för trenddetektion
@@ -537,6 +539,11 @@ async def fortnox_sync(req: FortnoxSyncRequest):
     for _, row in agg.iterrows():
         key = (str(row["period"]), str(row["account"]))
         by_period_account[key] = float(row["actual"])
+
+    # by_account for current period only (for dashboard display)
+    cur_by_account = df[df["period"] == current_period].groupby(
+        ["account", "account_name"]
+    ).agg(actual=("actual", "sum")).reset_index()
 
     # Räkna ut MoM-förändringar per konto
     MIN_ABS   = 10_000   # 10 tkr minimum för att flagga
@@ -546,7 +553,7 @@ async def fortnox_sync(req: FortnoxSyncRequest):
     top_budget  = []
     top_mom     = []
 
-    for _, r in by_account.iterrows():
+    for _, r in cur_by_account.iterrows() if not cur_by_account.empty else by_account.iterrows():
         konto      = str(r["account"])
         label      = r["account_name"] or konto
         actual_cur = float(r["actual"])
@@ -630,11 +637,11 @@ async def fortnox_sync(req: FortnoxSyncRequest):
     top_mom    = top_mom[:10]
 
     kpi_summary = {
-        "Nu": round(total_actual, 0),
-        "Föregående": round(float(df[df["period"] == previous_period]["actual"].sum()), 0) if previous_period else None,
-        "MoM diff": round(mom_diff, 0) if mom_diff is not None else None,
-        "MoM %": round(mom_pct, 4) if mom_pct is not None else None,
-        "Budget": 0,
+        "Nu":          round(total_actual, 0),
+        "Föregående":  round(prev_total_actual, 0) if previous_period else None,
+        "MoM diff":    round(mom_diff, 0) if mom_diff is not None else None,
+        "MoM %":       round(mom_pct, 4) if mom_pct is not None else None,
+        "Budget":      0,
         "Vs budget diff": 0,
         "Vs budget %": 0,
     }
@@ -653,7 +660,12 @@ async def fortnox_sync(req: FortnoxSyncRequest):
         "total_actual":    round(total_actual, 0),
         "total_budget":    0,
         "period_series":   period_series,
-        "account_rows":    agg.rename(columns={"account": "Konto", "account_name": "Label", "actual": "Utfall"}).to_dict(orient="records"),
+        "account_rows":    agg.rename(columns={
+            "account":      "Konto",
+            "account_name": "Label",
+            "actual":       "Utfall",
+            "period":       "period",
+        }).to_dict(orient="records"),
     }
 
     return {
