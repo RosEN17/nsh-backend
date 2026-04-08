@@ -7,7 +7,7 @@ import numpy as np
 import json, io, os, re
 from typing import Any, Optional
 from app.services.prompts import (
-    VARIANCE_SYSTEM, build_variance_context,
+    VARIANCE_SYSTEM, build_variance_context, build_account_trend_context,
     build_chat_system, build_narrative_prompt,
     INVOICE_SYSTEM, build_invoice_prompt,
     MAPPING_SYSTEM, build_mapping_prompt,
@@ -137,8 +137,32 @@ def compute_pack(df: pd.DataFrame, mapping: dict) -> dict:
                 "Vs budget %":   round(float(r.get("variance_pct") or 0), 4),
             }
 
-        top_budget = [row_to_dict(r) for _, r in by_account.sort_values("variance").head(10).iterrows()]
-        top_mom    = [row_to_dict(r) for _, r in by_account.sort_values("variance", ascending=False).head(10).iterrows()]
+        # Smart variance filtering — only flag real deviations
+        # Rules: >10% AND >50k, OR no budget but has large actual
+        MIN_ABS_AMOUNT = 50_000   # minimum 50 tkr for it to matter
+        MIN_PCT        = 0.10     # minimum 10% deviation
+
+        def is_real_variance(r):
+            var  = float(r.get("variance", 0))
+            var_pct = float(r.get("variance_pct") or 0)
+            budget_val = float(r.get("budget", 0) or 0)
+            actual_val = float(r.get("actual", 0) or 0)
+            if budget_val == 0:
+                # No budget — only flag if actual is significant
+                return abs(actual_val) >= MIN_ABS_AMOUNT
+            return abs(var) >= MIN_ABS_AMOUNT and abs(var_pct) >= MIN_PCT
+
+        all_sorted = by_account.sort_values("variance")
+        flagged    = all_sorted[all_sorted.apply(is_real_variance, axis=1)]
+        unflagged  = all_sorted[~all_sorted.apply(is_real_variance, axis=1)]
+
+        # top_budget = only real negative variances (cost overruns / revenue shortfalls)
+        neg_var = flagged[flagged["variance"] < 0]
+        pos_var = flagged[flagged["variance"] >= 0]
+        top_budget = [row_to_dict(r) for _, r in neg_var.head(10).iterrows()]
+        top_mom = [row_to_dict(r) for _, r in pos_var.head(10).iterrows()]
+        # Also store all flagged for variance page
+        all_flagged = [row_to_dict(r) for _, r in flagged.sort_values("variance").iterrows()]
 
         # MoM: compare current vs previous period if both exist
         mom_diff, mom_pct = None, None
@@ -191,6 +215,7 @@ def compute_pack(df: pd.DataFrame, mapping: dict) -> dict:
         "narrative":       narrative,
         "top_budget":      top_budget,
         "top_mom":         top_mom,
+        "all_flagged":     all_flagged if "all_flagged" in dir() else [],
         "kpi_summary":     [kpi_summary],
         "total_actual":    round(total_actual, 0),
         "total_budget":    round(total_budget, 0),
@@ -1315,14 +1340,27 @@ async def chat(req: ChatRequest):
             client = OpenAI(api_key=openai_key)
 
             if is_variance:
+                # Extract konto from question if available
+                import re as _re
+                konto_match = _re.search(r"Konto[:\s]+([\d]+)", req.question)
+                label_match = _re.search(r"Konto[:\s]+[\d]+[\s—-]+([^\n|]+)", req.question)
+
                 context = build_variance_context(pack)
+
+                # Add account-specific trend if konto is mentioned
+                if konto_match:
+                    konto_nr = konto_match.group(1).strip()
+                    label    = label_match.group(1).strip() if label_match else konto_nr
+                    trend_ctx = build_account_trend_context(konto_nr, label, pack)
+                    context = trend_ctx + "\n\n" + context
+
                 resp = client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[
                         {"role": "system", "content": VARIANCE_SYSTEM},
                         {"role": "user",   "content": f"{context}\n\n{req.question}"},
                     ],
-                    max_tokens=700,
+                    max_tokens=800,
                     temperature=0.1,
                 )
             else:
