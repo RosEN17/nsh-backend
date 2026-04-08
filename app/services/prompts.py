@@ -28,27 +28,38 @@ Du svarar alltid på svenska."""
 
 VARIANCE_SYSTEM = CONTROLLER_IDENTITY + """
 
-När du analyserar avvikelser följer du dessa regler:
+Du är NordSheets starkaste funktion — djup avvikelseanalys som förstår mönster över tid.
 
-VÄGLEDNING FÖR VAD SOM ÄR VÄRT ATT FLAGGA:
-✓ Flagga: Avvikelse >10% OCH >50 000 kr
-✓ Flagga: Samma konto avviker 3+ perioder i rad (strukturellt problem)
-✓ Flagga: Avvikelse accelererar (t.ex. +8% → +12% → +18%)
-✓ Flagga: Konto som historiskt är stabilt plötsligt rör sig kraftigt
-✓ Flagga: Budget saknas helt på konto med högt utfall
+AVVIKELSEANALYS — SÅ HÄR TÄNKER DU:
 
-✗ Ignorera: Semesterlöner/sociala avgifter i juni-juli (säsong)
-✗ Ignorera: Bokslutskostnader i december (säsong)
-✗ Ignorera: Avvikelse <5% på konton med naturlig variation
-✗ Ignorera: Engångshändelse som redan är förklarad
+Du ser inte bara en period. Du ser ett mönster. Din uppgift är att svara på tre frågor:
+  1. VAD har hänt? (konkret, med siffror)
+  2. HUR LÄNGE har det pågått? (basera på historiken du får)
+  3. VAD HÄNDER om ingen agerar? (räkna ut helårseffekt)
 
-STRUKTUR FÖR DITT SVAR (följ alltid exakt):
-1. ORSAK: Vad beror avvikelsen sannolikt på? (konkret, max 2 meningar)
-2. TYP: Engångs / Återkommande / Strukturell (basera på historiken)
-3. ÅTGÄRD: Vad bör controllern göra nu? (konkret handling)
-4. PROGNOS: Om trenden håller, vad blir helårseffekten i kr?
+KLASSIFICERING:
+- Engångshändelse: avvikelse i en period, normalt annars
+- Återkommande: avviker 2-3 perioder — troligt mönster, kräver förklaring
+- Strukturell: avviker 4+ perioder — fundamentalt problem, kräver åtgärd
 
-Använd alltid siffror från den finansiella kontexten."""
+SÄSONGSJUSTERINGAR (ignorera dessa som avvikelser):
+- Juni-juli: semesterlöner, sociala avgifter +20-40% är normalt
+- December: bokslutsposter, årsavstämningar
+- Mars: kvartalsavgifter
+- Om du ser dessa mönster, nämn det som förklaring, inte avvikelse
+
+HELÅRSPROGNOS:
+Om en kostnad ökat med X kr per månad under N månader:
+  → Helårseffekt = X * kvarvarande månader till december
+  → Kommunicera detta i kronor, inte i procent
+
+STRUKTUR (följ alltid exakt):
+1. ORSAK: Vad beror avvikelsen sannolikt på? Inkludera hur länge det pågått.
+2. TYP: Engångs / Återkommande / Strukturell — med motivering baserad på historiken
+3. ÅTGÄRD: Konkret handling — vem ska göra vad och när?
+4. PROGNOS: Helårseffekt i kronor om trenden håller i sig
+
+Max 2 meningar per punkt. Använd alltid faktiska siffror."""
 
 
 def build_variance_context(pack: dict) -> str:
@@ -91,8 +102,46 @@ Total avvikelse:   {pack.get('total_actual', 0) - pack.get('total_budget', 0):+,
         ctx += "\n".join(history_lines)
 
     if top_lines:
-        ctx += f"\n\nTopp 5 kontona med störst budgetavvikelse:\n"
+        ctx += f"\n\nTopp 5 kontona med störst avvikelse:\n"
         ctx += "\n".join(top_lines)
+
+    return ctx
+
+
+def build_account_trend_context(konto: str, label: str, pack: dict) -> str:
+    """Bygger trendkontext för ett specifikt konto — historik per period."""
+    account_rows = pack.get("account_rows", [])
+    period_series_full = pack.get("period_series", [])
+
+    # Hitta detta kontos värden per period
+    konto_history = []
+    for r in account_rows:
+        k = str(r.get("Konto") or r.get("account") or "")
+        if k == konto or k.startswith(konto):
+            p = str(r.get("period") or r.get("Period") or "")
+            v = float(r.get("Utfall") or r.get("actual") or 0)
+            konto_history.append((p, v))
+
+    konto_history.sort(key=lambda x: x[0])
+
+    ctx = f"Konto: {konto} — {label}\n"
+    if konto_history:
+        ctx += "Historik per period:\n"
+        for p, v in konto_history[-8:]:
+            ctx += f"  {p}: {v:,.0f} kr\n"
+
+        # Beräkna trend
+        vals = [v for _, v in konto_history]
+        if len(vals) >= 3:
+            diffs = [vals[i] - vals[i-1] for i in range(1, len(vals))]
+            neg_streak = sum(1 for d in reversed(diffs) if d < 0)
+            pos_streak = sum(1 for d in reversed(diffs) if d > 0)
+            if neg_streak >= 2:
+                ctx += f"TREND: Sjunkande {neg_streak} perioder i rad\n"
+            elif pos_streak >= 2:
+                ctx += f"TREND: Stigande {pos_streak} perioder i rad\n"
+    else:
+        ctx += "Ingen periodhistorik tillgänglig\n"
 
     return ctx
 
