@@ -515,15 +515,28 @@ async def fortnox_sync(req: FortnoxSyncRequest):
     current_period = periods[-1] if periods else "Unknown"
     previous_period = periods[-2] if len(periods) >= 2 else None
 
-    # Total actual = current period only (not all periods summed)
-    cur_period_rows = df[df["period"] == current_period]
-    total_actual = float(cur_period_rows["actual"].sum()) if not cur_period_rows.empty else float(by_account["actual"].sum())
-    prev_total_actual = float(df[df["period"] == previous_period]["actual"].sum()) if previous_period else 0
+    # Filtrera till resultaträkningskonton (3xxx-8xxx) för meningsfull summering
+    # Balansräkningskonton (1xxx-2xxx) tar ut varandra i dubbel bokföring
+    def is_income_expense(account_nr: str) -> bool:
+        try:
+            n = int(str(account_nr).strip()[:1])
+            return n >= 3  # 3xxx=intäkter, 4-7xxx=kostnader, 8xxx=finansiella
+        except Exception:
+            return True
 
-    # Period series — per period summering
+    df_result = df[df["account"].apply(is_income_expense)]
+
+    # Total actual = resultaträkning current period
+    cur_period_rows = df_result[df_result["period"] == current_period]
+    total_actual = float(cur_period_rows["actual"].sum()) if not cur_period_rows.empty else 0.0
+
+    prev_period_rows = df_result[df_result["period"] == previous_period] if previous_period else None
+    prev_total_actual = float(prev_period_rows["actual"].sum()) if prev_period_rows is not None and not prev_period_rows.empty else 0.0
+
+    # Period series — bara resultaträkning per period
     period_series = []
     for p in periods:
-        p_df  = df[df["period"] == p]
+        p_df  = df_result[df_result["period"] == p]
         p_sum = float(p_df["actual"].sum())
         period_series.append({"period": p, "actual": round(p_sum, 0), "budget": 0})
 
