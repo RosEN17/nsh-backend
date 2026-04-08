@@ -531,29 +531,103 @@ async def fortnox_sync(req: FortnoxSyncRequest):
         mom_diff = cur_total - prev_total
         mom_pct = (cur_total - prev_total) / abs(prev_total) if prev_total != 0 else None
 
-    # Top konton (störst belopp)
-    by_account_sorted = by_account.sort_values("actual", ascending=True)
-    top_budget = []
-    for _, r in by_account_sorted.head(10).iterrows():
-        top_budget.append({
-            "Konto": str(r["account"]),
-            "Label": r["account_name"] or str(r["account"]),
-            "Utfall": round(float(r["actual"]), 0),
-            "Budget": 0,
-            "Vs budget diff": round(float(r["actual"]), 0),
-            "Vs budget %": 0,
-        })
+    # ── 4) Smarter variance detection med MoM-jämförelse ────────
+    # Bygg per-period lookup för trenddetektion
+    by_period_account = {}
+    for _, row in agg.iterrows():
+        key = (str(row["period"]), str(row["account"]))
+        by_period_account[key] = float(row["actual"])
 
-    top_mom = []
-    for _, r in by_account_sorted.tail(10).iterrows():
-        top_mom.append({
-            "Konto": str(r["account"]),
-            "Label": r["account_name"] or str(r["account"]),
-            "Utfall": round(float(r["actual"]), 0),
-            "Budget": 0,
-            "Vs budget diff": round(float(r["actual"]), 0),
-            "Vs budget %": 0,
-        })
+    # Räkna ut MoM-förändringar per konto
+    MIN_ABS   = 10_000   # 10 tkr minimum för att flagga
+    MIN_MOM   = 0.15     # 15% MoM-förändring
+
+    all_flagged = []
+    top_budget  = []
+    top_mom     = []
+
+    for _, r in by_account.iterrows():
+        konto      = str(r["account"])
+        label      = r["account_name"] or konto
+        actual_cur = float(r["actual"])
+
+        # MoM-trend: jämför current vs previous period
+        prev_val = by_period_account.get((previous_period, konto), None) if previous_period else None
+        cur_val  = by_period_account.get((current_period, konto), None)
+
+        mom_diff_acc = None
+        mom_pct_acc  = None
+        if prev_val is not None and cur_val is not None and prev_val != 0:
+            mom_diff_acc = cur_val - prev_val
+            mom_pct_acc  = mom_diff_acc / abs(prev_val)
+
+        # Trend: hur många perioder i rad har kontot rört sig åt samma håll?
+        account_history = []
+        for p in periods[-6:]:
+            v = by_period_account.get((p, konto))
+            if v is not None:
+                account_history.append(v)
+
+        trend_direction = None
+        consecutive_periods = 0
+        if len(account_history) >= 3:
+            diffs = [account_history[i] - account_history[i-1] for i in range(1, len(account_history))]
+            if all(d > 0 for d in diffs[-2:]):
+                trend_direction = "stigande"
+                consecutive_periods = sum(1 for d in reversed(diffs) if d > 0)
+            elif all(d < 0 for d in diffs[-2:]):
+                trend_direction = "sjunkande"
+                consecutive_periods = sum(1 for d in reversed(diffs) if d < 0)
+
+        # Är detta en flaggningsvärd avvikelse?
+        is_flagged = False
+        flag_reason = []
+
+        if mom_diff_acc is not None and abs(mom_diff_acc) >= MIN_ABS and abs(mom_pct_acc or 0) >= MIN_MOM:
+            is_flagged = True
+            flag_reason.append(f"MoM {'+' if mom_diff_acc > 0 else ''}{mom_diff_acc:,.0f} kr ({(mom_pct_acc or 0)*100:+.1f}%)")
+
+        if consecutive_periods >= 3:
+            is_flagged = True
+            flag_reason.append(f"{trend_direction} {consecutive_periods} perioder i rad")
+
+        # Klassificera typ baserat på mönster
+        var_type = "Okänd"
+        if consecutive_periods >= 3:
+            var_type = "Strukturell"
+        elif consecutive_periods >= 2:
+            var_type = "Återkommande"
+        elif mom_diff_acc is not None and abs(mom_diff_acc) >= MIN_ABS:
+            var_type = "Engång"
+
+        row_dict = {
+            "Konto":          konto,
+            "Label":          label,
+            "Utfall":         round(actual_cur, 0),
+            "Budget":         0,
+            "Vs budget diff": round(mom_diff_acc or 0, 0),
+            "Vs budget %":    round(mom_pct_acc or 0, 4),
+            "MoM diff":       round(mom_diff_acc or 0, 0),
+            "MoM %":          round(mom_pct_acc or 0, 4),
+            "trend_direction":      trend_direction,
+            "consecutive_periods":  consecutive_periods,
+            "flag_reason":          " | ".join(flag_reason),
+            "variance_type":        var_type,
+            "account_history":      account_history,
+        }
+
+        if is_flagged:
+            all_flagged.append(row_dict)
+            if (mom_diff_acc or 0) < 0 or (actual_cur < 0 and trend_direction == "sjunkande"):
+                top_budget.append(row_dict)
+            else:
+                top_mom.append(row_dict)
+
+    # Sortera: störst absolut avvikelse först
+    top_budget.sort(key=lambda x: abs(x.get("MoM diff", 0)), reverse=True)
+    top_mom.sort(key=lambda x: abs(x.get("MoM diff", 0)), reverse=True)
+    top_budget = top_budget[:10]
+    top_mom    = top_mom[:10]
 
     kpi_summary = {
         "Nu": round(total_actual, 0),
@@ -561,24 +635,25 @@ async def fortnox_sync(req: FortnoxSyncRequest):
         "MoM diff": round(mom_diff, 0) if mom_diff is not None else None,
         "MoM %": round(mom_pct, 4) if mom_pct is not None else None,
         "Budget": 0,
-        "Vs budget diff": round(total_actual, 0),
+        "Vs budget diff": 0,
         "Vs budget %": 0,
     }
 
     pack = {
-        "source": "fortnox",
-        "current_period": current_period,
+        "source":          "fortnox",
+        "current_period":  current_period,
         "previous_period": previous_period,
-        "periods": periods,
-        "warnings": ["Budget-data saknas från Fortnox — lägg till manuellt eller ladda upp budgetfil."],
-        "narrative": f"Period {current_period}: Utfall {total_actual:,.0f} SEK från Fortnox ({len(rows)} transaktioner, {len(accounts_map)} konton).",
-        "top_budget": top_budget,
-        "top_mom": top_mom,
-        "kpi_summary": [kpi_summary],
-        "total_actual": round(total_actual, 0),
-        "total_budget": 0,
-        "period_series": period_series,
-        "account_rows": by_account.fillna(0).to_dict(orient="records"),
+        "periods":         periods,
+        "warnings":        ["Budget-data saknas — avvikelser baseras på MoM-jämförelse."] if not req.from_date else [],
+        "narrative":       f"Period {current_period}: Utfall {total_actual:,.0f} SEK. {len(all_flagged)} konton med MoM-avvikelse över 15%.",
+        "top_budget":      top_budget,
+        "top_mom":         top_mom,
+        "all_flagged":     all_flagged,
+        "kpi_summary":     [kpi_summary],
+        "total_actual":    round(total_actual, 0),
+        "total_budget":    0,
+        "period_series":   period_series,
+        "account_rows":    agg.rename(columns={"account": "Konto", "account_name": "Label", "actual": "Utfall"}).to_dict(orient="records"),
     }
 
     return {
