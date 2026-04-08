@@ -6,6 +6,8 @@ import pandas as pd
 import numpy as np
 import json, io, os, re
 from typing import Any, Optional
+from fortnox_routes import fortnox_router
+
 
 app = FastAPI(title="NordSheet API")
 
@@ -17,6 +19,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(fortnox_router)
 
 # ═══════════════════════════════════════════════════════════════════
 # HELPERS
