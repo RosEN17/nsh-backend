@@ -193,6 +193,23 @@ def compute_pack(df: pd.DataFrame, mapping: dict) -> dict:
         ).reset_index().sort_values("period")
         period_series = ps.fillna(0).to_dict(orient="records")
 
+    # ── Detailed rows: per period + per account (för drilldown & AI) ──
+    detailed_rows = []
+    if "period" in df.columns and "account" in df.columns:
+        detail_grp = ["period", "account"]
+        if "account_name" in df.columns:
+            detail_grp.append("account_name")
+        detail_agg = {"actual": "sum"}
+        if "budget" in df.columns:
+            detail_agg["budget"] = "sum"
+        if "cost_center" in df.columns:
+            detail_agg["cost_center"] = "first"
+        if "project" in df.columns:
+            detail_agg["project"] = "first"
+        
+        detail_df = df.groupby(detail_grp, dropna=False).agg(detail_agg).reset_index()
+        detailed_rows = detail_df.fillna(0).to_dict(orient="records")
+
     # Narrative
     var = total_actual - total_budget
     var_pct = safe_pct(total_actual, total_budget)
@@ -223,6 +240,7 @@ def compute_pack(df: pd.DataFrame, mapping: dict) -> dict:
         "total_budget":    round(total_budget, 0),
         "period_series":   period_series,
         "account_rows":    by_account.fillna(0).to_dict(orient="records") if not by_account.empty else [],
+        "detailed_rows":   detailed_rows,
     }
 
 
