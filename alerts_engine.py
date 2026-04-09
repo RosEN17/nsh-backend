@@ -482,3 +482,327 @@ async def drilldown(req: DrilldownRequest):
         "transactions": raw_matches,
         "total_rows": len(matches),
     }
+
+
+# ═══════════════════════════════════════════════════════════════════
+# DATA QUALITY ENGINE — "Vad saknas eller ser konstigt ut?"
+# ═══════════════════════════════════════════════════════════════════
+
+def detect_data_issues(pack: dict) -> list[dict]:
+    """
+    Analyserar hela datasetet och hittar:
+    - Saknade perioder (konto bokfört varje månad utom en)
+    - Tomma konton som borde ha värden
+    - Ovanligt stora/små belopp (outliers)
+    - Konton som plötsligt slutat användas
+    - Perioder helt utan bokföring
+    """
+    account_rows = pack.get("account_rows", [])
+    periods = pack.get("periods", [])
+    current_period = pack.get("current_period", "")
+    total_actual = abs(float(pack.get("total_actual", 1))) or 1
+
+    if not account_rows or not periods:
+        return []
+
+    df = pd.DataFrame(account_rows)
+    for col in ["account", "account_name", "actual", "budget", "period"]:
+        if col not in df.columns:
+            df[col] = 0 if col in ["actual", "budget"] else ""
+    df["actual"] = pd.to_numeric(df["actual"], errors="coerce").fillna(0)
+    df["budget"] = pd.to_numeric(df["budget"], errors="coerce").fillna(0)
+
+    has_periods = "period" in df.columns and df["period"].nunique() > 1
+    if not has_periods:
+        return []
+
+    all_periods = sorted(df["period"].dropna().astype(str).unique().tolist())
+    issues = []
+
+    # ── Per konto: bygg profil ──
+    for account_nr, grp in df.groupby("account"):
+        account_nr = str(account_nr)
+        account_name = str(grp["account_name"].iloc[0]) if "account_name" in grp.columns else account_nr
+        periods_present = set(grp["period"].astype(str).unique())
+        values = grp.sort_values("period")["actual"].tolist()
+
+        # 1. SAKNADE PERIODER
+        # Konto som förekommer i de flesta perioder men saknar en/några
+        if len(all_periods) >= 4 and len(periods_present) >= len(all_periods) * 0.6:
+            missing = [p for p in all_periods if p not in periods_present]
+            if 0 < len(missing) <= 2:
+                avg_val = grp["actual"].mean()
+                if abs(avg_val) > total_actual * 0.002:  # bara om kontot är väsentligt
+                    issues.append({
+                        "type": "missing_period",
+                        "account": account_nr,
+                        "account_name": account_name,
+                        "detail": {
+                            "missing_periods": missing,
+                            "expected_periods": len(all_periods),
+                            "present_periods": len(periods_present),
+                            "avg_value": round(avg_val, 0),
+                        },
+                    })
+
+        # 2. OUTLIERS — ovanligt stora/små belopp
+        if len(values) >= 4:
+            arr = np.array(values)
+            nonzero = arr[arr != 0]
+            if len(nonzero) >= 3:
+                median = float(np.median(nonzero))
+                std = float(np.std(nonzero))
+                if std > 0 and abs(median) > total_actual * 0.001:
+                    for _, row in grp.iterrows():
+                        val = float(row["actual"])
+                        period = str(row.get("period", ""))
+                        if val != 0 and abs(val - median) > 2.5 * std:
+                            issues.append({
+                                "type": "outlier",
+                                "account": account_nr,
+                                "account_name": account_name,
+                                "detail": {
+                                    "period": period,
+                                    "value": round(val, 0),
+                                    "median": round(median, 0),
+                                    "deviation_factor": round(abs(val - median) / std, 1),
+                                },
+                            })
+
+        # 3. KONTO SOM SLUTAT ANVÄNDAS
+        # Hade värden i början men noll i senaste perioderna
+        if len(values) >= 4:
+            first_half = values[:len(values)//2]
+            second_half = values[len(values)//2:]
+            first_active = sum(1 for v in first_half if v != 0)
+            second_active = sum(1 for v in second_half if v != 0)
+            avg_first = np.mean([abs(v) for v in first_half if v != 0]) if first_active > 0 else 0
+            if first_active >= 2 and second_active == 0 and avg_first > total_actual * 0.002:
+                issues.append({
+                    "type": "dormant_account",
+                    "account": account_nr,
+                    "account_name": account_name,
+                    "detail": {
+                        "last_active_period": str(grp[grp["actual"] != 0].sort_values("period")["period"].iloc[-1]) if len(grp[grp["actual"] != 0]) > 0 else "?",
+                        "avg_when_active": round(avg_first, 0),
+                    },
+                })
+
+    # 4. TOMMA KONTON MED BUDGET
+    # Konton som har budget men noll utfall — kan tyda på att bokföring saknas
+    if "budget" in df.columns:
+        budget_grp = df.groupby("account").agg(
+            total_actual=("actual", "sum"),
+            total_budget=("budget", "sum"),
+            account_name=("account_name", "first"),
+        ).reset_index()
+        for _, row in budget_grp.iterrows():
+            if abs(float(row["total_budget"])) > total_actual * 0.005 and float(row["total_actual"]) == 0:
+                issues.append({
+                    "type": "budget_no_actual",
+                    "account": str(row["account"]),
+                    "account_name": str(row["account_name"]),
+                    "detail": {
+                        "budget": round(float(row["total_budget"]), 0),
+                    },
+                })
+
+    # 5. PERIODER UTAN BOKFÖRING
+    if len(all_periods) >= 3:
+        period_totals = df.groupby("period")["actual"].sum()
+        for p in all_periods:
+            if p in period_totals.index:
+                total = abs(float(period_totals[p]))
+                avg = abs(float(period_totals.mean()))
+                if avg > 0 and total < avg * 0.1:
+                    issues.append({
+                        "type": "empty_period",
+                        "account": "—",
+                        "account_name": "Hela bolaget",
+                        "detail": {
+                            "period": p,
+                            "total": round(total, 0),
+                            "expected": round(avg, 0),
+                        },
+                    })
+
+    return issues
+
+
+class DataQualityRequest(BaseModel):
+    pack: dict
+
+
+@alerts_router.post("/data-quality")
+async def data_quality(req: DataQualityRequest):
+    """
+    Hittar datakvalitetsproblem och låter AI bedöma vilka som spelar roll.
+    """
+    pack = req.pack or {}
+    issues = detect_data_issues(pack)
+
+    if not issues:
+        return {
+            "checks": [],
+            "summary": "Inga datakvalitetsproblem hittades.",
+            "total_issues_found": 0,
+        }
+
+    total_actual = abs(float(pack.get("total_actual", 0)))
+    current_period = pack.get("current_period", "")
+
+    # ── Bygg AI-prompt ──
+    openai_key = os.getenv("OPENAI_API_KEY")
+
+    if openai_key and len(issues) > 0:
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=openai_key)
+
+            issue_descriptions = []
+            for issue in issues[:30]:  # max 30 till prompten
+                t = issue["type"]
+                d = issue["detail"]
+                acc = f"{issue['account']} {issue['account_name']}"
+                if t == "missing_period":
+                    issue_descriptions.append(
+                        f"SAKNAD PERIOD: {acc} — saknar data för {', '.join(d['missing_periods'])} "
+                        f"(finns i {d['present_periods']}/{d['expected_periods']} perioder, snitt {fmt_sek(d['avg_value'])})"
+                    )
+                elif t == "outlier":
+                    issue_descriptions.append(
+                        f"OVANLIGT BELOPP: {acc} — {d['period']}: {fmt_sek(d['value'])} "
+                        f"(median: {fmt_sek(d['median'])}, {d['deviation_factor']}x standardavvikelse)"
+                    )
+                elif t == "dormant_account":
+                    issue_descriptions.append(
+                        f"INAKTIVT KONTO: {acc} — senast aktivt {d['last_active_period']}, "
+                        f"snitt {fmt_sek(d['avg_when_active'])} när aktivt, noll sedan dess"
+                    )
+                elif t == "budget_no_actual":
+                    issue_descriptions.append(
+                        f"BUDGET UTAN UTFALL: {acc} — budget {fmt_sek(d['budget'])} men 0 kr bokfört"
+                    )
+                elif t == "empty_period":
+                    issue_descriptions.append(
+                        f"TOM PERIOD: {d['period']} — bara {fmt_sek(d['total'])} bokfört "
+                        f"(normalt {fmt_sek(d['expected'])})"
+                    )
+
+            prompt = f"""Du är en erfaren redovisningskonsult som granskar datakvalitet i bokföringen.
+
+BOLAG: Omsättning {fmt_sek(total_actual)}, period {current_period}
+
+POTENTIELLA PROBLEM ({len(issues)} st hittade av systemet):
+{chr(10).join(issue_descriptions)}
+
+UPPGIFT:
+Välj ut BARA de problem som en controller faktiskt behöver åtgärda.
+Ignorera:
+- Bagateller (små konton, obetydliga belopp)
+- Saker som troligen har naturliga förklaringar (säsongsvariationer etc)
+- Konton som inte påverkar resultat- eller balansräkning väsentligt
+
+Returnera BARA JSON:
+{{
+  "flagged": [
+    {{
+      "type": "missing_period|outlier|dormant_account|budget_no_actual|empty_period",
+      "account": "kontonummer",
+      "severity": "critical|warning|info",
+      "headline": "Kort rubrik (max 8 ord)",
+      "explanation": "1-2 meningar: vad som troligen hänt och varför det spelar roll",
+      "suggestion": "Konkret åtgärd"
+    }}
+  ],
+  "overall": "1 mening om datakvaliteten generellt"
+}}
+
+Flagga 0-5 problem. Kvalitet > kvantitet."""
+
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "Du är expert på redovisning och datakvalitet. Returnera BARA JSON."},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=800,
+                temperature=0.1,
+            )
+
+            raw = re.sub(r"```json|```", "", resp.choices[0].message.content or "{}").strip()
+            ai_result = json.loads(raw)
+
+        except Exception as e:
+            print(f"[DataQuality] AI error: {e}")
+            ai_result = None
+    else:
+        ai_result = None
+
+    # ── Bygg response ──
+    if ai_result and "flagged" in ai_result:
+        checks = []
+        for f in ai_result["flagged"]:
+            # Hitta matchande issue för drilldown-data
+            match = next((
+                iss for iss in issues
+                if iss["type"] == f.get("type") and str(iss["account"]) == str(f.get("account", ""))
+            ), None)
+
+            checks.append({
+                "type": f.get("type", ""),
+                "account": f.get("account", ""),
+                "account_name": match["account_name"] if match else "",
+                "severity": f.get("severity", "info"),
+                "headline": f.get("headline", ""),
+                "explanation": f.get("explanation", ""),
+                "suggestion": f.get("suggestion", ""),
+                "detail": match["detail"] if match else {},
+            })
+
+        return {
+            "checks": checks,
+            "summary": ai_result.get("overall", ""),
+            "total_issues_found": len(issues),
+            "ai_flagged": len(checks),
+        }
+
+    # ── Fallback utan AI ──
+    # Sortera efter typ-prioritet och ta topp 5
+    type_priority = {
+        "budget_no_actual": 5,
+        "empty_period": 4,
+        "missing_period": 3,
+        "outlier": 2,
+        "dormant_account": 1,
+    }
+    issues.sort(key=lambda i: type_priority.get(i["type"], 0), reverse=True)
+
+    checks = []
+    for iss in issues[:5]:
+        t = iss["type"]
+        d = iss["detail"]
+        headlines = {
+            "missing_period": f"{iss['account_name']} saknar data i {', '.join(d.get('missing_periods', []))}",
+            "outlier": f"Ovanligt belopp på {iss['account_name']}",
+            "dormant_account": f"{iss['account_name']} har slutat användas",
+            "budget_no_actual": f"{iss['account_name']} har budget men inget utfall",
+            "empty_period": f"Period {d.get('period', '?')} saknar bokföring",
+        }
+        checks.append({
+            "type": t,
+            "account": iss["account"],
+            "account_name": iss["account_name"],
+            "severity": "warning" if t in ("budget_no_actual", "empty_period") else "info",
+            "headline": headlines.get(t, "Datakvalitetsproblem"),
+            "explanation": "",
+            "suggestion": "Kontrollera bokföringen.",
+            "detail": d,
+        })
+
+    return {
+        "checks": checks,
+        "summary": f"{len(issues)} potentiella problem hittades, {len(checks)} bedöms som väsentliga.",
+        "total_issues_found": len(issues),
+        "ai_flagged": len(checks),
+    }
