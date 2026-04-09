@@ -46,6 +46,8 @@ def analyze_all_accounts(pack: dict) -> list[dict]:
     Analyserar ALLA konton med tidsserier, persistence, acceleration.
     Returnerar en lista med pre-beräknad data per konto.
     """
+    # Föredra detailed_rows (per-period-per-konto) framför account_rows (bara aggregat)
+    detailed_rows = pack.get("detailed_rows", [])
     account_rows = pack.get("account_rows", [])
     period_series = pack.get("period_series", [])
     total_actual = abs(float(pack.get("total_actual", 1))) or 1
@@ -53,11 +55,12 @@ def analyze_all_accounts(pack: dict) -> list[dict]:
     current_period = pack.get("current_period", "")
     periods = pack.get("periods", [])
 
-    if not account_rows:
+    source_rows = detailed_rows if detailed_rows else account_rows
+    if not source_rows:
         return []
 
     # Skapa DataFrame från alla rader
-    df = pd.DataFrame(account_rows)
+    df = pd.DataFrame(source_rows)
 
     # Säkerställ kolumner
     for col in ["account", "account_name", "actual", "budget", "variance", "variance_pct", "period"]:
@@ -497,15 +500,17 @@ def detect_data_issues(pack: dict) -> list[dict]:
     - Konton som plötsligt slutat användas
     - Perioder helt utan bokföring
     """
+    detailed_rows = pack.get("detailed_rows", [])
     account_rows = pack.get("account_rows", [])
     periods = pack.get("periods", [])
     current_period = pack.get("current_period", "")
     total_actual = abs(float(pack.get("total_actual", 1))) or 1
 
-    if not account_rows or not periods:
+    source_rows = detailed_rows if detailed_rows else account_rows
+    if not source_rows or not periods:
         return []
 
-    df = pd.DataFrame(account_rows)
+    df = pd.DataFrame(source_rows)
     for col in ["account", "account_name", "actual", "budget", "period"]:
         if col not in df.columns:
             df[col] = 0 if col in ["actual", "budget"] else ""
