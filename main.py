@@ -2,6 +2,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from alerts_engine import alerts_router
 import pandas as pd
 import numpy as np
 import json, io, os, re
@@ -27,6 +28,7 @@ app.add_middleware(
 )
 
 app.include_router(fortnox_router)
+app.include_router(alerts_router)
 
 # ═══════════════════════════════════════════════════════════════════
 # HELPERS
