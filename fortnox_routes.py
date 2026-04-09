@@ -679,7 +679,7 @@ async def fortnox_sync(req: FortnoxSyncRequest):
             "actual":       "Utfall",
             "period":       "period",
         }).to_dict(orient="records"),
-        "detailed_rows":   agg.to_dict(orient="records"),
+        "detailed_rows":   agg[agg["account"].apply(is_income_expense)].to_dict(orient="records"),
     }
 
     return {
