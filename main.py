@@ -195,6 +195,7 @@ def compute_pack(df: pd.DataFrame, mapping: dict) -> dict:
 
     # ── Detailed rows: per period + per account (för drilldown & AI) ──
     detailed_rows = []
+    print(f"[DEBUG] df columns: {list(df.columns)}, rows: {len(df)}, has period: {'period' in df.columns}, has account: {'account' in df.columns}")
     if "period" in df.columns and "account" in df.columns:
         detail_grp = ["period", "account"]
         if "account_name" in df.columns:
