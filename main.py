@@ -86,6 +86,10 @@ def compute_pack(df: pd.DataFrame, mapping: dict) -> dict:
     df = df.rename(columns=rename)
     warnings = []
 
+    # Fallback: om "account" saknas men "account_name" finns, skapa den
+    if "account" not in df.columns and "account_name" in df.columns:
+        df["account"] = df["account_name"]
+
     # Numeric coercion
     for col in ["actual", "budget"]:
         if col in df.columns:
@@ -195,7 +199,6 @@ def compute_pack(df: pd.DataFrame, mapping: dict) -> dict:
 
     # ── Detailed rows: per period + per account (för drilldown & AI) ──
     detailed_rows = []
-    print(f"[DEBUG] df columns: {list(df.columns)}, rows: {len(df)}, has period: {'period' in df.columns}, has account: {'account' in df.columns}")
     if "period" in df.columns and "account" in df.columns:
         detail_grp = ["period", "account"]
         if "account_name" in df.columns:
