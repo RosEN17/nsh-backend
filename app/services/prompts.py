@@ -151,18 +151,91 @@ def build_account_trend_context(konto: str, label: str, pack: dict) -> str:
 # ═══════════════════════════════════════════════════════════════════
 
 def build_chat_system(pack: dict) -> str:
-    """System-prompt för allmän finansiell chat."""
+    """System-prompt för allmän finansiell chat — med FULL datakontext."""
+    import json
+
+    total_actual = pack.get('total_actual', 0)
+    total_budget = pack.get('total_budget', 0)
+    variance = total_actual - total_budget
+
+    # Build period series summary
+    period_series = pack.get('period_series', [])
+    period_lines = ""
+    if period_series:
+        period_lines = "\nPeriodöversikt (alla perioder):\n"
+        for p in period_series:
+            period_lines += f"  {p.get('period','?')}: utfall {p.get('actual',0):,.0f} kr, budget {p.get('budget',0):,.0f} kr\n"
+
+    # Build account-level detail for the current period
+    account_rows = pack.get('account_rows', [])
+    account_lines = ""
+    if account_rows:
+        account_lines = "\nKontodetaljer (aktuell period, topp 50 efter belopp):\n"
+        sorted_rows = sorted(account_rows, key=lambda x: abs(x.get('Utfall', x.get('actual', 0)) or 0), reverse=True)[:50]
+        for r in sorted_rows:
+            konto = r.get('Konto', r.get('account', ''))
+            label = r.get('Label', r.get('account_name', konto))
+            utfall = r.get('Utfall', r.get('actual', 0)) or 0
+            budget = r.get('Budget', r.get('budget', 0)) or 0
+            diff = utfall - budget
+            account_lines += f"  {konto} {label}: utfall {utfall:,.0f} kr, budget {budget:,.0f} kr, avvikelse {diff:+,.0f} kr\n"
+
+    # Build detailed rows summary grouped by period+account (for cross-period queries)
+    detailed_rows = pack.get('detailed_rows', [])
+    detail_summary = ""
+    if detailed_rows:
+        # Group by period to give AI access to historical data
+        from collections import defaultdict
+        by_period = defaultdict(list)
+        for r in detailed_rows:
+            by_period[str(r.get('period', ''))].append(r)
+
+        detail_summary = f"\nDetaljerad data ({len(detailed_rows)} rader, {len(by_period)} perioder):\n"
+        for period in sorted(by_period.keys()):
+            rows = by_period[period]
+            period_total = sum(r.get('actual', 0) or 0 for r in rows)
+            detail_summary += f"\n  Period {period} (totalt {period_total:,.0f} kr, {len(rows)} konton):\n"
+            sorted_period_rows = sorted(rows, key=lambda x: abs(x.get('actual', 0) or 0), reverse=True)[:20]
+            for r in sorted_period_rows:
+                acct = r.get('account', '')
+                name = r.get('account_name', acct)
+                actual = r.get('actual', 0) or 0
+                budget = r.get('budget', 0) or 0
+                detail_summary += f"    {acct} {name}: {actual:,.0f} kr (budget {budget:,.0f} kr)\n"
+
+    # Flagged alerts
+    flagged = pack.get('all_flagged', [])
+    flagged_lines = ""
+    if flagged:
+        flagged_lines = f"\nFlaggade avvikelser ({len(flagged)} st):\n"
+        for f in flagged[:10]:
+            headline = f.get('headline', f.get('Label', f.get('Konto', '?')))
+            impact = f.get('impact', f.get('Vs budget diff', 0)) or 0
+            sev = f.get('severity', f.get('Severity', ''))
+            flagged_lines += f"  [{sev}] {headline}: {impact:+,.0f} kr\n"
+
     return f"""{CONTROLLER_IDENTITY}
 
-Du har tillgång till följande finansiella data:
-- Period: {pack.get('current_period', '?')}
-- Utfall: {pack.get('total_actual', 0):,.0f} kr
-- Budget: {pack.get('total_budget', 0):,.0f} kr
-- Avvikelse: {pack.get('total_actual', 0) - pack.get('total_budget', 0):+,.0f} kr
-- Föregående period: {pack.get('previous_period', '?')}
+Du har tillgång till FULLSTÄNDIG bokföringsdata från Fortnox:
 
-Svara kort och konkret. Max 3 meningar om inget annat begärs.
-Använd siffror från datan, inte vaga uppskattningar."""
+Sammanfattning:
+- Aktuell period: {pack.get('current_period', '?')}
+- Totalt utfall: {total_actual:,.0f} kr
+- Total budget: {total_budget:,.0f} kr
+- Avvikelse: {variance:+,.0f} kr
+- Antal perioder: {len(period_series)}
+- Antal konton: {len(account_rows)}
+- Detaljrader: {len(detailed_rows)}
+{period_lines}{account_lines}{detail_summary}{flagged_lines}
+{f'AI-narrativ: {pack.get("narrative", "")}' if pack.get('narrative') else ''}
+
+VIKTIGT:
+- Du har ALL data ovan. Svara baserat på den. Säg aldrig att du saknar data om informationen finns ovan.
+- Om användaren frågar om en specifik period, sök igenom detaljdatan.
+- Om användaren frågar om ett specifikt konto, sök igenom kontodatan.
+- Om användaren ber dig jämföra perioder, använd periodöversikten och detaljdatan.
+- Svara kort och konkret. Max 3 meningar om inget annat begärs.
+- Använd alltid siffror. Undvik vaga uppskattningar."""
 
 
 # ═══════════════════════════════════════════════════════════════════
