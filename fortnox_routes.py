@@ -410,84 +410,112 @@ class FortnoxSyncRequest(BaseModel):
 @fortnox_router.post("/sync")
 async def fortnox_sync(req: FortnoxSyncRequest):
     """
-    HUVUDFUNKTION — Hämtar data från Fortnox och bygger pack-format
-    som NordSheet dashboard + variansanalys förstår.
-
-    Flöde:
-    1. Hämta kontoplan (konto-nr → kontonamn)
-    2. Hämta verifikationer med transaktionsrader
-    3. Aggregera per konto + period → utfall
-    4. Returnera i pack-format (samma som CSV-upload ger)
+    HUVUDFUNKTION — Hämtar data från Fortnox och bygger pack-format.
+    Optimerad: parallella voucher-anrop med delad httpx-klient.
     """
+    import asyncio
+
     token = await _get_valid_token(req.company_id)
 
-    # ── 1) Kontoplan ──────────────────────────────────────────────
-    accounts_map = {}
-    page = 1
-    while True:
-        params = {"page": page}
-        if req.financial_year:
-            params["financialyear"] = req.financial_year
-        data = await _fortnox_api_get("/accounts", token, params)
-        for acc in data.get("Accounts", []):
-            accounts_map[acc["Number"]] = {
-                "description": acc.get("Description", ""),
-                "sru": acc.get("SRU", 0),
-                "balance_brought": acc.get("BalanceBroughtForward", 0),
-            }
-        meta = data.get("MetaInformation", {})
-        if page >= meta.get("@TotalPages", 1):
-            break
-        page += 1
+    # Delad httpx-klient för alla anrop i synken
+    async with httpx.AsyncClient(timeout=30, headers={
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }) as client:
 
-    # ── 2) Verifikationer med transaktionsrader ───────────────────
-    # Vi hämtar alla vouchers och bygger en DataFrame-liknande struktur
-    rows = []
-    page = 1
-    while True:
-        params = {"page": page}
-        if req.financial_year:
-            params["financialyear"] = req.financial_year
-        if req.from_date:
-            params["fromdate"] = req.from_date
-        if req.to_date:
-            params["todate"] = req.to_date
+        async def _api_get(endpoint: str, params: dict = None) -> dict:
+            resp = await client.get(
+                f"{FORTNOX_API_BASE}{endpoint}",
+                params=params or {},
+            )
+            if resp.status_code == 429:
+                # Rate limit — wait and retry once
+                await asyncio.sleep(1)
+                resp = await client.get(f"{FORTNOX_API_BASE}{endpoint}", params=params or {})
+            if resp.status_code >= 400:
+                raise HTTPException(status_code=resp.status_code, detail=f"Fortnox API-fel: {resp.text[:300]}")
+            return resp.json()
 
-        data = await _fortnox_api_get("/vouchers", token, params)
+        # ── 1) Kontoplan ──────────────────────────────────────────────
+        accounts_map = {}
+        page = 1
+        while True:
+            params = {"page": page}
+            if req.financial_year:
+                params["financialyear"] = req.financial_year
+            data = await _api_get("/accounts", params)
+            for acc in data.get("Accounts", []):
+                accounts_map[acc["Number"]] = {
+                    "description": acc.get("Description", ""),
+                    "sru": acc.get("SRU", 0),
+                    "balance_brought": acc.get("BalanceBroughtForward", 0),
+                }
+            meta = data.get("MetaInformation", {})
+            if page >= meta.get("@TotalPages", 1):
+                break
+            page += 1
 
-        for voucher in data.get("Vouchers", []):
-            v_date = voucher.get("TransactionDate", voucher.get("Date", ""))
-            # Period = YYYY-MM
-            period = v_date[:7] if v_date and len(v_date) >= 7 else "Unknown"
+        # ── 2) Verifikationer — hämta lista, sen detaljer parallellt ──
+        # Först: samla alla voucher-referenser
+        voucher_refs = []  # (series, number, period)
+        page = 1
+        while True:
+            params = {"page": page}
+            if req.financial_year:
+                params["financialyear"] = req.financial_year
+            if req.from_date:
+                params["fromdate"] = req.from_date
+            if req.to_date:
+                params["todate"] = req.to_date
 
-            # Hämta detaljerad voucher med rader
-            v_series = voucher.get("VoucherSeries", "")
-            v_number = voucher.get("VoucherNumber", "")
-            if v_series and v_number is not None:
-                try:
-                    fy_param = f"?financialyear={req.financial_year}" if req.financial_year else ""
-                    detail = await _fortnox_api_get(
-                        f"/vouchers/{v_series}/{v_number}{fy_param}",
-                        token,
-                    )
-                    v_rows = detail.get("Voucher", {}).get("VoucherRows", [])
-                    for row in v_rows:
-                        acc_nr = row.get("Account", 0)
-                        rows.append({
-                            "period": period,
-                            "account": str(acc_nr),
-                            "account_name": accounts_map.get(acc_nr, {}).get("description", ""),
-                            "actual": float(row.get("Debit", 0) or 0) - float(row.get("Credit", 0) or 0),
-                            "cost_center": row.get("CostCenter", ""),
-                            "project": row.get("Project", ""),
-                        })
-                except Exception as e:
-                    print(f"[Fortnox] Voucher detail error {v_series}-{v_number}: {e}")
+            data = await _api_get("/vouchers", params)
 
-        meta = data.get("MetaInformation", {})
-        if page >= meta.get("@TotalPages", 1):
-            break
-        page += 1
+            for voucher in data.get("Vouchers", []):
+                v_date = voucher.get("TransactionDate", voucher.get("Date", ""))
+                period = v_date[:7] if v_date and len(v_date) >= 7 else "Unknown"
+                v_series = voucher.get("VoucherSeries", "")
+                v_number = voucher.get("VoucherNumber", "")
+                if v_series and v_number is not None:
+                    voucher_refs.append((v_series, v_number, period))
+
+            meta = data.get("MetaInformation", {})
+            if page >= meta.get("@TotalPages", 1):
+                break
+            page += 1
+
+        # Sen: hämta detaljer parallellt i batchar om 15
+        rows = []
+        BATCH_SIZE = 15  # Fortnox rate limit-vänligt
+
+        async def _fetch_voucher_detail(series: str, number: int, period: str) -> list:
+            try:
+                fy_param = f"?financialyear={req.financial_year}" if req.financial_year else ""
+                detail = await _api_get(f"/vouchers/{series}/{number}{fy_param}")
+                result = []
+                for row in detail.get("Voucher", {}).get("VoucherRows", []):
+                    acc_nr = row.get("Account", 0)
+                    result.append({
+                        "period": period,
+                        "account": str(acc_nr),
+                        "account_name": accounts_map.get(acc_nr, {}).get("description", ""),
+                        "actual": float(row.get("Debit", 0) or 0) - float(row.get("Credit", 0) or 0),
+                        "cost_center": row.get("CostCenter", ""),
+                        "project": row.get("Project", ""),
+                    })
+                return result
+            except Exception as e:
+                print(f"[Fortnox] Voucher detail error {series}-{number}: {e}")
+                return []
+
+        # Process in batches
+        for i in range(0, len(voucher_refs), BATCH_SIZE):
+            batch = voucher_refs[i:i + BATCH_SIZE]
+            results = await asyncio.gather(*[
+                _fetch_voucher_detail(s, n, p) for s, n, p in batch
+            ])
+            for result_rows in results:
+                rows.extend(result_rows)
 
     if not rows:
         return {
