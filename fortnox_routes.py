@@ -412,6 +412,7 @@ async def fortnox_sync(req: FortnoxSyncRequest):
     """
     HUVUDFUNKTION — Hämtar data från Fortnox och bygger pack-format.
     Optimerad: parallella voucher-anrop med delad httpx-klient.
+    Hämtar automatiskt senaste 2 räkenskapsåren om inget specifikt anges.
     """
     import asyncio
 
@@ -437,13 +438,30 @@ async def fortnox_sync(req: FortnoxSyncRequest):
                 raise HTTPException(status_code=resp.status_code, detail=f"Fortnox API-fel: {resp.text[:300]}")
             return resp.json()
 
-        # ── 1) Kontoplan ──────────────────────────────────────────────
+        # ── 0) Bestäm vilka räkenskapsår att hämta ─────────────────
+        financial_years_to_fetch = []
+        if req.financial_year:
+            financial_years_to_fetch = [req.financial_year]
+        else:
+            # Hämta alla räkenskapsår och ta de senaste 2
+            try:
+                fy_data = await _api_get("/financialyears")
+                all_fys = fy_data.get("FinancialYears", [])
+                # Sortera efter Id (högst = senast)
+                sorted_fys = sorted(all_fys, key=lambda x: x.get("Id", 0), reverse=True)
+                financial_years_to_fetch = [fy["Id"] for fy in sorted_fys[:2]]
+            except Exception as e:
+                print(f"[Fortnox] Kunde inte hämta räkenskapsår: {e}")
+                financial_years_to_fetch = [None]  # Fallback: default
+
+        # ── 1) Kontoplan (från senaste räkenskapsåret) ─────────────
         accounts_map = {}
+        fy_for_accounts = financial_years_to_fetch[0] if financial_years_to_fetch else None
         page = 1
         while True:
             params = {"page": page}
-            if req.financial_year:
-                params["financialyear"] = req.financial_year
+            if fy_for_accounts:
+                params["financialyear"] = fy_for_accounts
             data = await _api_get("/accounts", params)
             for acc in data.get("Accounts", []):
                 accounts_map[acc["Number"]] = {
@@ -456,41 +474,42 @@ async def fortnox_sync(req: FortnoxSyncRequest):
                 break
             page += 1
 
-        # ── 2) Verifikationer — hämta lista, sen detaljer parallellt ──
-        # Först: samla alla voucher-referenser
-        voucher_refs = []  # (series, number, period)
-        page = 1
-        while True:
-            params = {"page": page}
-            if req.financial_year:
-                params["financialyear"] = req.financial_year
-            if req.from_date:
-                params["fromdate"] = req.from_date
-            if req.to_date:
-                params["todate"] = req.to_date
+        # ── 2) Verifikationer — hämta från alla räkenskapsår ──────
+        voucher_refs = []  # (series, number, period, financial_year)
 
-            data = await _api_get("/vouchers", params)
+        for fy in financial_years_to_fetch:
+            page = 1
+            while True:
+                params = {"page": page}
+                if fy:
+                    params["financialyear"] = fy
+                if req.from_date:
+                    params["fromdate"] = req.from_date
+                if req.to_date:
+                    params["todate"] = req.to_date
 
-            for voucher in data.get("Vouchers", []):
-                v_date = voucher.get("TransactionDate", voucher.get("Date", ""))
-                period = v_date[:7] if v_date and len(v_date) >= 7 else "Unknown"
-                v_series = voucher.get("VoucherSeries", "")
-                v_number = voucher.get("VoucherNumber", "")
-                if v_series and v_number is not None:
-                    voucher_refs.append((v_series, v_number, period))
+                data = await _api_get("/vouchers", params)
 
-            meta = data.get("MetaInformation", {})
-            if page >= meta.get("@TotalPages", 1):
-                break
-            page += 1
+                for voucher in data.get("Vouchers", []):
+                    v_date = voucher.get("TransactionDate", voucher.get("Date", ""))
+                    period = v_date[:7] if v_date and len(v_date) >= 7 else "Unknown"
+                    v_series = voucher.get("VoucherSeries", "")
+                    v_number = voucher.get("VoucherNumber", "")
+                    if v_series and v_number is not None:
+                        voucher_refs.append((v_series, v_number, period, fy))
+
+                meta = data.get("MetaInformation", {})
+                if page >= meta.get("@TotalPages", 1):
+                    break
+                page += 1
 
         # Sen: hämta detaljer parallellt i batchar om 15
         rows = []
-        BATCH_SIZE = 15  # Fortnox rate limit-vänligt
+        BATCH_SIZE = 15
 
-        async def _fetch_voucher_detail(series: str, number: int, period: str) -> list:
+        async def _fetch_voucher_detail(series: str, number: int, period: str, fy) -> list:
             try:
-                fy_param = f"?financialyear={req.financial_year}" if req.financial_year else ""
+                fy_param = f"?financialyear={fy}" if fy else ""
                 detail = await _api_get(f"/vouchers/{series}/{number}{fy_param}")
                 result = []
                 for row in detail.get("Voucher", {}).get("VoucherRows", []):
@@ -512,7 +531,7 @@ async def fortnox_sync(req: FortnoxSyncRequest):
         for i in range(0, len(voucher_refs), BATCH_SIZE):
             batch = voucher_refs[i:i + BATCH_SIZE]
             results = await asyncio.gather(*[
-                _fetch_voucher_detail(s, n, p) for s, n, p in batch
+                _fetch_voucher_detail(s, n, p, fy) for s, n, p, fy in batch
             ])
             for result_rows in results:
                 rows.extend(result_rows)
