@@ -1,14 +1,14 @@
 """
-ByggKalk AI — Backend API
+NordSheet AI — Backend API
 """
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Dict, List
 from app.services.ai import generate_estimate, chat_about_estimate
 
-app = FastAPI(title="ByggKalk AI API")
+app = FastAPI(title="NordSheet AI API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -19,6 +19,11 @@ app.add_middleware(
 )
 
 
+class ImageData(BaseModel):
+    name: str
+    data: str  # base64 data URL
+
+
 class EstimateRequest(BaseModel):
     description: str
     job_type: Optional[str] = None
@@ -27,6 +32,9 @@ class EstimateRequest(BaseModel):
     hourly_rate: Optional[float] = 650
     include_rot: bool = True
     margin_pct: Optional[float] = 15
+    build_params: Optional[Dict[str, str]] = None
+    images: Optional[List[ImageData]] = None
+    documents: Optional[List[ImageData]] = None
 
 
 class ChatRequest(BaseModel):
@@ -36,11 +44,11 @@ class ChatRequest(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "byggkalk-ai"}
+    return {"status": "ok", "service": "nordsheet-ai"}
 
 
 @app.post("/api/estimate")
-async def create_estimate_endpoint(req: EstimateRequest):
+async def estimate(req: EstimateRequest):
     try:
         result = await generate_estimate(
             description=req.description,
@@ -50,6 +58,9 @@ async def create_estimate_endpoint(req: EstimateRequest):
             hourly_rate=req.hourly_rate or 650,
             include_rot=req.include_rot,
             margin_pct=req.margin_pct or 15,
+            build_params=req.build_params,
+            images=req.images,
+            documents=req.documents,
         )
         return result
     except Exception as e:
@@ -57,7 +68,7 @@ async def create_estimate_endpoint(req: EstimateRequest):
 
 
 @app.post("/api/chat")
-async def chat_endpoint(req: ChatRequest):
+async def chat(req: ChatRequest):
     try:
         reply = await chat_about_estimate(req.message, req.estimate_context)
         return {"reply": reply}
@@ -67,17 +78,15 @@ async def chat_endpoint(req: ChatRequest):
 
 @app.get("/api/job-types")
 def job_types():
-    return {
-        "job_types": [
-            {"id": "badrum", "label": "Badrumsrenovering", "icon": "🚿"},
-            {"id": "kok", "label": "Köksrenovering", "icon": "🍳"},
-            {"id": "tak", "label": "Takbyte", "icon": "🏠"},
-            {"id": "fasad", "label": "Fasadrenovering", "icon": "🧱"},
-            {"id": "golv", "label": "Golvläggning", "icon": "🪵"},
-            {"id": "malning", "label": "Målning", "icon": "🎨"},
-            {"id": "el", "label": "Elinstallation", "icon": "⚡"},
-            {"id": "vvs", "label": "VVS-arbete", "icon": "🔧"},
-            {"id": "tillbyggnad", "label": "Tillbyggnad", "icon": "🏗️"},
-            {"id": "ovrigt", "label": "Övrigt", "icon": "📋"},
-        ]
-    }
+    return [
+        {"id": "badrum", "label": "Badrum", "icon": "🚿"},
+        {"id": "kok", "label": "Kök", "icon": "🍳"},
+        {"id": "golv", "label": "Golv", "icon": "🪵"},
+        {"id": "malning", "label": "Målning", "icon": "🎨"},
+        {"id": "tak", "label": "Tak", "icon": "🏠"},
+        {"id": "el", "label": "El", "icon": "⚡"},
+        {"id": "vvs", "label": "VVS", "icon": "🔧"},
+        {"id": "fasad", "label": "Fasad", "icon": "🧱"},
+        {"id": "tillbyggnad", "label": "Tillbyggnad", "icon": "📐"},
+        {"id": "ovrigt", "label": "Övrigt", "icon": "🔨"},
+    ]
