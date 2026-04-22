@@ -149,7 +149,7 @@ async def notify_acceptance(req: AcceptNotifyRequest):
                     "Content-Type": "application/json",
                 },
                 json={
-                    "from": "NordSheet <onboarding@resend.dev>",
+                    "from": "NordSheet <noreply@nordsheet.com>",
                     "to": [req.company_email],
                     "subject": f"Offert godkand: {req.quote_title} — {req.customer_name}",
                     "html": html_body,
