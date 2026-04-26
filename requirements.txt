@@ -4,3 +4,4 @@ openai>=1.30.0
 python-dotenv>=1.0.0
 python-multipart>=0.0.9
 httpx
+pypdf>=4.0.0
