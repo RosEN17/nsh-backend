@@ -20,7 +20,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+RESEND_API_KEY        = os.getenv("RESEND_API_KEY", "")
+SUPABASE_URL          = os.getenv("SUPABASE_URL", "")
+SUPABASE_SERVICE_KEY  = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 
 
 class ImageData(BaseModel):
@@ -167,6 +169,14 @@ async def notify_acceptance(req: AcceptNotifyRequest):
     except httpx.HTTPError as e:
         raise HTTPException(status_code=500, detail=f"Mail error: {str(e)}")
 
+
+
+@app.get("/api/norms/{job_type}")
+async def get_norms(job_type: str):
+    """Hämta arbetstidsnormer för en jobbtyp — används för testning."""
+    from app.services.ai import fetch_norms
+    norms_text = await fetch_norms(job_type)
+    return {"job_type": job_type, "norms": norms_text or "Inga normer hittades"}
 
 @app.get("/api/job-types")
 def job_types():
