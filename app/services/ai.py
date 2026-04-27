@@ -1,6 +1,7 @@
 """
 NordSheet AI — Kalkylgenerering med GPT-4o
-Hämtar arbetstidsnormer från Supabase och injicerar i system-prompten.
+Hämtar arbetstidsnormer + historiska offerter från Supabase.
+Historiska offerter injiceras som few-shot-exempel i prompten.
 """
 
 import json
@@ -98,7 +99,6 @@ async def fetch_norms(job_type: str, house_age: str = "all") -> str:
         return ""
 
     try:
-        # Normalisera jobbtyp — matcha mot tabellens job_type-värden
         type_map = {
             "badrum": "badrum", "bathroom": "badrum",
             "kok": "kok", "kök": "kok", "kitchen": "kok",
@@ -130,13 +130,11 @@ async def fetch_norms(job_type: str, house_age: str = "all") -> str:
         if not norms:
             return ""
 
-        # Filtrera på husålder — ta alltid "all", plus specifik ålder om angiven
         relevant = [
             n for n in norms
             if n["house_age"] == "all" or n["house_age"] == house_age
         ]
 
-        # Om äldre hus finns mer specifik norm — ta den istället för "all"
         if house_age != "all":
             seen = {}
             for n in relevant:
@@ -159,14 +157,153 @@ async def fetch_norms(job_type: str, house_age: str = "all") -> str:
         return "\n".join(lines)
 
     except Exception:
-        # Om Supabase inte svarar — fortsätt utan normer
         return ""
+
+
+async def fetch_few_shot_examples(job_type: str, complexity: Optional[str] = None, region: Optional[str] = None) -> str:
+    """
+    Hämtar 3 vinnande historiska offerter från quotes-tabellen.
+    Dessa injiceras i prompten som few-shot-exempel så att AI:n
+    lär sig verkliga prisnivåer, arbetsmoment och faktorer.
+
+    Urvalsordning:
+      1. Matchar job_type + complexity + region  (bästa match)
+      2. Matchar job_type + complexity
+      3. Matchar job_type
+    Alltid outcome = 'won' för att bara lära av vinnande offerter.
+    """
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return ""
+
+    headers = {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+    }
+
+    # Normalisera job_type mot vad som finns i quotes-tabellen
+    type_map = {
+        "kok": "kok", "kök": "kok", "kitchen": "kok",
+        "badrum": "badrum", "bathroom": "badrum",
+        "golv": "golv", "floor": "golv",
+        "malning": "malning", "målning": "malning",
+        "tak": "tak", "fasad": "fasad",
+        "tillbyggnad": "tillbyggnad", "vvs": "vvs", "el": "el",
+    }
+    db_type = type_map.get((job_type or "").lower(), (job_type or "").lower())
+
+    # Bygg parametrar — börja med striktaste match och lossa om för få träffar
+    base_params = {
+        "project_type": f"eq.{db_type}",
+        "outcome": "eq.won",
+        "select": "quote_number,project_type,complexity,region,labor_cost,material_cost,total_incl_vat,rot_deduction,customer_net_cost,waste_factor,risk_factor,tile_price_per_sqm,work_items,material_items,craftsman_edits,notes",
+        "limit": "3",
+        "order": "quote_date.desc",
+    }
+
+    if complexity:
+        base_params["complexity"] = f"eq.{complexity}"
+    if region:
+        base_params["region"] = f"eq.{region}"
+
+    examples = []
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as http:
+            r = await http.get(
+                f"{SUPABASE_URL}/rest/v1/quotes",
+                params=base_params,
+                headers=headers,
+            )
+
+            if r.status_code == 200:
+                examples = r.json()
+
+            # Om för få — prova utan region
+            if len(examples) < 2 and region:
+                params2 = {k: v for k, v in base_params.items() if k != "region"}
+                r2 = await http.get(
+                    f"{SUPABASE_URL}/rest/v1/quotes",
+                    params=params2,
+                    headers=headers,
+                )
+                if r2.status_code == 200:
+                    examples = r2.json()
+
+            # Om fortfarande för få — prova utan complexity heller
+            if len(examples) < 1 and complexity:
+                params3 = {k: v for k, v in base_params.items() if k not in ("region", "complexity")}
+                r3 = await http.get(
+                    f"{SUPABASE_URL}/rest/v1/quotes",
+                    params=params3,
+                    headers=headers,
+                )
+                if r3.status_code == 200:
+                    examples = r3.json()
+
+    except Exception:
+        return ""
+
+    if not examples:
+        return ""
+
+    # Formatera exemplen som läsbar text för prompten
+    lines = [
+        "\n\nHISTORISKA OFFERTER SOM VANN AFFÄREN (FEW-SHOT EXEMPEL):",
+        "Använd dessa som referens för prisnivåer, arbetsmoment och faktorer.",
+        "Dessa är verkliga offerter som kunden accepterade.\n",
+    ]
+
+    for i, ex in enumerate(examples, 1):
+        lines.append(f"--- EXEMPEL {i}: {ex.get('project_type','').upper()} ({ex.get('complexity','')}) ---")
+        lines.append(f"Region: {ex.get('region', 'ej angiven')}")
+        lines.append(f"Arbetskostnad (exkl. moms): {ex.get('labor_cost', 0):,.0f} kr")
+        lines.append(f"Materialkostnad (exkl. moms): {ex.get('material_cost', 0):,.0f} kr")
+        lines.append(f"Totalt inkl. moms: {ex.get('total_incl_vat', 0):,.0f} kr")
+        lines.append(f"ROT-avdrag: {ex.get('rot_deduction', 0):,.0f} kr")
+        lines.append(f"Kunden betalade netto: {ex.get('customer_net_cost', 0):,.0f} kr")
+
+        if ex.get('waste_factor'):
+            lines.append(f"Svinnfaktor: {float(ex['waste_factor'])*100:.0f}%")
+        if ex.get('risk_factor'):
+            lines.append(f"Riskpåslag: {float(ex['risk_factor'])*100:.0f}%")
+        if ex.get('tile_price_per_sqm'):
+            lines.append(f"Kakel/klinker: {ex['tile_price_per_sqm']} kr/kvm inkl. moms")
+
+        work_items = ex.get('work_items') or []
+        if work_items:
+            lines.append(f"Arbetsmoment ({len(work_items)} st): {', '.join(work_items[:8])}")
+            if len(work_items) > 8:
+                lines.append(f"  ... och {len(work_items) - 8} till")
+
+        # Om snickaren justerade AI-förslaget — visa vad och varför
+        edits = ex.get('craftsman_edits')
+        if edits:
+            lines.append("Justeringar snickaren gjorde vs AI-förslag:")
+            if isinstance(edits, dict):
+                for field, edit in edits.items():
+                    if isinstance(edit, dict):
+                        ai_val = edit.get('ai', '?')
+                        final_val = edit.get('final', '?')
+                        reason = edit.get('reason', '')
+                        lines.append(f"  {field}: AI föreslog {ai_val} → snickaren satte {final_val}. Anledning: {reason}")
+
+        if ex.get('notes'):
+            lines.append(f"Not: {ex['notes'][:200]}")
+
+        lines.append("")
+
+    lines.append(
+        "INSTRUKTION: Låt dessa exempel guida dina prisnivåer. "
+        "Om ditt jobb liknar Exempel 1 men är mer komplext — motivera avvikelsen i assumptions."
+    )
+
+    return "\n".join(lines)
 
 
 def _extract_pdf_text(b64_data: str) -> str:
     """Extrahera text ur base64-kodad PDF med pypdf."""
     try:
-        import pypdf  # type: ignore
+        import pypdf
         raw = b64_data.split(",")[-1]
         pdf_bytes = base64.b64decode(raw + "==")
         reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
@@ -273,7 +410,6 @@ def _build_user_text(
 
 
 def _detect_house_age(build_params: Optional[Dict[str, str]]) -> str:
-    """Avgör husålder från build_params för att välja rätt norm."""
     if not build_params:
         return "all"
     year_str = build_params.get("build_year", "")
@@ -284,6 +420,37 @@ def _detect_house_age(build_params: Optional[Dict[str, str]]) -> str:
         return "pre1975" if year < 1975 else "post1975"
     except (ValueError, TypeError):
         return "all"
+
+
+def _detect_complexity(build_params: Optional[Dict[str, str]], description: str) -> Optional[str]:
+    """
+    Gissa komplexitet från parametrar och beskrivning
+    för att hitta bättre few-shot-matchning.
+    """
+    if not build_params and not description:
+        return None
+
+    desc_lower = (description or "").lower()
+    params = build_params or {}
+
+    # Specialist-signaler
+    specialist_keywords = ["ny vägg", "bärande", "bygglov", "asbest", "flytt av vvb",
+                           "flytt tvättmaskin", "ombyggnad", "tillbyggnad"]
+    if any(kw in desc_lower for kw in specialist_keywords):
+        return "specialist"
+
+    # High-signaler
+    high_keywords = ["brunnsflytt", "flytt av brunn", "nytt avlopp", "el framdragning",
+                     "framdragning el", "golvvärme", "fuktskada"]
+    if any(kw in desc_lower for kw in high_keywords):
+        return "high"
+
+    # Low-signaler
+    low_keywords = ["kakel", "måla", "tätskikt", "byte av", "enkel"]
+    if any(kw in desc_lower for kw in low_keywords):
+        return "low"
+
+    return "medium"
 
 
 async def generate_estimate(
@@ -299,14 +466,26 @@ async def generate_estimate(
     documents: Optional[List] = None,
 ) -> dict:
 
-    # Hämta normer från Supabase
     house_age = _detect_house_age(build_params)
-    norms_text = await fetch_norms(job_type or "badrum", house_age)
+    complexity = _detect_complexity(build_params, description)
 
-    # Bygg system-prompt med normer injicerade
+    # Hämta normer och few-shot-exempel parallellt
+    import asyncio
+    norms_text, few_shot_text = await asyncio.gather(
+        fetch_norms(job_type or "badrum", house_age),
+        fetch_few_shot_examples(
+            job_type or "badrum",
+            complexity=complexity,
+            region=location,
+        ),
+    )
+
+    # Bygg system-prompt med normer + historiska exempel injicerade
     system = SYSTEM_PROMPT
     if norms_text:
         system += f"\n\n{norms_text}"
+    if few_shot_text:
+        system += f"\n\n{few_shot_text}"
 
     user_text = _build_user_text(
         description=description,
