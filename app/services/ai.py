@@ -1,6 +1,6 @@
 """
 NordSheet AI — Kalkylgenerering med GPT-4o
-Stöder byggparametrar, bilder (vision) och PDF-underlag (base64 → text)
+Hämtar arbetstidsnormer från Supabase och injicerar i system-prompten.
 """
 
 import json
@@ -9,8 +9,12 @@ import base64
 import io
 from typing import Optional, Dict, List
 from openai import AsyncOpenAI
+import httpx
 
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 
 SYSTEM_PROMPT = """Du är en erfaren svensk byggkalkylator-AI. Du genererar detaljerade kostnadskalkyler för hantverksjobb i Sverige.
 
@@ -24,6 +28,13 @@ REGLER:
 - Varje rad ska ha: description, note (kort förklaring), unit (timmar/kvm/st/meter/kg), quantity, unit_price, total, type (labor/material/equipment)
 - Gruppera i kategorier (Rivning, Förberedelse, Installation, Material, Efterarbete etc.)
 - Varje kategori har: name, rows[], subtotal
+
+KRITISKT — ARBETSTIDSNORMER:
+- Normdatabasen nedan anger exakt hur många timmar varje moment tar per enhet
+- Du MÅSTE räkna timmar från normdatabasen — aldrig från magkänsla eller generella antaganden
+- Multiplikation: norm (h/enhet) × antal enheter = timmar för momentet
+- Avrunda alltid uppåt till närmaste halvtimme
+- Om ett moment saknas i normdatabasen: använd närmaste liknande norm och notera det
 
 VIKTIGT OM BYGGPARAMETRAR:
 - Använd ALLA parametrar som anges — mått, checkboxar, jobbtyp — för att göra kalkylen exakt
@@ -40,10 +51,9 @@ VIKTIGT OM BILDER:
 - Om skador eller avvikelser syns: lägg till extra poster och/eller varningar
 
 VIKTIGT OM PDF-UNDERLAG OCH RITNINGAR:
-- Om PDF-innehåll bifogas: läs noggrant igenom det — det kan vara ett mail med kundens krav, en offertförfrågan, en ritning eller en specifikation
+- Om PDF-innehåll bifogas: läs noggrant igenom det — det kan vara ett mail med kundens krav, en offertförfrågan eller en specifikation
 - Extrahera all relevant information: mått, materialval, specifika krav, tidsramar, adress
 - Prioritera information från PDF:en framför generella antaganden
-- Om ritningar bifogas som bilder: läs av mått och rumsindelning
 
 SVARA ALLTID med exakt denna JSON-struktur (inget annat):
 {
@@ -80,6 +90,77 @@ SVARA ALLTID med exakt denna JSON-struktur (inget annat):
   "warnings": ["Eventuella varningar"],
   "assumptions": ["Antaganden som gjorts"]
 }"""
+
+
+async def fetch_norms(job_type: str, house_age: str = "all") -> str:
+    """Hämta arbetstidsnormer från Supabase och returnera som prompttext."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return ""
+
+    try:
+        # Normalisera jobbtyp — matcha mot tabellens job_type-värden
+        type_map = {
+            "badrum": "badrum", "bathroom": "badrum",
+            "kok": "kok", "kök": "kok", "kitchen": "kok",
+            "tak": "tak", "roof": "tak",
+            "fasad": "fasad", "facade": "fasad",
+            "golv": "golv", "floor": "golv",
+            "malning": "malning", "målning": "malning", "painting": "malning",
+        }
+        db_type = type_map.get(job_type.lower(), job_type.lower())
+
+        async with httpx.AsyncClient(timeout=5.0) as http:
+            r = await http.get(
+                f"{SUPABASE_URL}/rest/v1/work_norms",
+                params={
+                    "job_type": f"eq.{db_type}",
+                    "select": "label,hours_per,unit,house_age,region",
+                    "order": "moment",
+                },
+                headers={
+                    "apikey": SUPABASE_SERVICE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                },
+            )
+
+        if r.status_code != 200:
+            return ""
+
+        norms = r.json()
+        if not norms:
+            return ""
+
+        # Filtrera på husålder — ta alltid "all", plus specifik ålder om angiven
+        relevant = [
+            n for n in norms
+            if n["house_age"] == "all" or n["house_age"] == house_age
+        ]
+
+        # Om äldre hus finns mer specifik norm — ta den istället för "all"
+        if house_age != "all":
+            seen = {}
+            for n in relevant:
+                key = n["label"]
+                if key not in seen or n["house_age"] == house_age:
+                    seen[key] = n
+            relevant = list(seen.values())
+
+        lines = [
+            f"\nARBETSTIDSNORMER FÖR {db_type.upper()} "
+            f"(MÅSTE ANVÄNDAS — RÄKNA ALDRIG UTAN DESSA):"
+        ]
+        for n in relevant:
+            lines.append(f"  {n['label']}: {n['hours_per']} timmar per {n['unit']}")
+
+        lines.append(
+            "\nBEREKNING: norm × antal enheter = timmar. "
+            "Avrunda uppåt till närmaste 0.5 timme."
+        )
+        return "\n".join(lines)
+
+    except Exception:
+        # Om Supabase inte svarar — fortsätt utan normer
+        return ""
 
 
 def _extract_pdf_text(b64_data: str) -> str:
@@ -125,7 +206,6 @@ def _build_user_text(
     parts.append(f"Påslag: {margin_pct}%")
     parts.append(f"ROT-avdrag: {'Ja (30% på arbete)' if include_rot else 'Nej'}")
 
-    # Alla byggparametrar med svenska etiketter
     if build_params:
         LABELS = {
             "floor_sqm":      "Golvyta",
@@ -172,7 +252,6 @@ def _build_user_text(
         if lines:
             parts.append("\nSmarta parametrar:\n" + "\n".join(lines))
 
-    # PDF-underlag — extrahera och bifoga text
     if documents:
         doc_blocks = []
         for doc in documents:
@@ -193,6 +272,20 @@ def _build_user_text(
     return "\n".join(parts)
 
 
+def _detect_house_age(build_params: Optional[Dict[str, str]]) -> str:
+    """Avgör husålder från build_params för att välja rätt norm."""
+    if not build_params:
+        return "all"
+    year_str = build_params.get("build_year", "")
+    if not year_str:
+        return "all"
+    try:
+        year = int(str(year_str).replace("ca", "").strip()[:4])
+        return "pre1975" if year < 1975 else "post1975"
+    except (ValueError, TypeError):
+        return "all"
+
+
 async def generate_estimate(
     description: str,
     job_type: Optional[str] = None,
@@ -206,6 +299,15 @@ async def generate_estimate(
     documents: Optional[List] = None,
 ) -> dict:
 
+    # Hämta normer från Supabase
+    house_age = _detect_house_age(build_params)
+    norms_text = await fetch_norms(job_type or "badrum", house_age)
+
+    # Bygg system-prompt med normer injicerade
+    system = SYSTEM_PROMPT
+    if norms_text:
+        system += f"\n\n{norms_text}"
+
     user_text = _build_user_text(
         description=description,
         job_type=job_type,
@@ -218,7 +320,7 @@ async def generate_estimate(
         documents=documents,
     )
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages = [{"role": "system", "content": system}]
 
     all_images = list(images or [])
 
