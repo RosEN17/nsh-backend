@@ -297,6 +297,8 @@ async def generate_estimate(
     build_params: Optional[Dict[str, str]] = None,
     images: Optional[List] = None,
     documents: Optional[List] = None,
+    company_id: Optional[str] = None,  # mottages men används ej i AI-anropet ännu
+    **kwargs,  # framtidssäkert — ignorerar okända argument
 ) -> dict:
 
     # Hämta normer från Supabase
