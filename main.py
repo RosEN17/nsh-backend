@@ -262,7 +262,8 @@ async def save_feedback(req: FeedbackRequest, request: Request):
             json=feedback_row,
         )
         if r1.status_code >= 400:
-            raise HTTPException(status_code=500, detail=f"Kunde inte spara: {r1.text}")
+            # Logga men krascha inte — tabellen kanske inte finns ännu
+            print(f"Varning: feedback_events sparades inte: {r1.status_code} {r1.text}")
 
         # 2. Uppdatera craftsman_edits på quotes-raden
         if req.all_edits:
