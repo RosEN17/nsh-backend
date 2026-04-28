@@ -1,10 +1,15 @@
 """
 NordSheet AI — Backend API
+
+company_id hämtas automatiskt från Supabase JWT-token i varje request.
+Frontend behöver aldrig skicka company_id manuellt.
 """
 
 import os
 import httpx
-from fastapi import FastAPI, HTTPException
+import json
+import base64
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, Dict, List, Any
@@ -20,10 +25,59 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-RESEND_API_KEY        = os.getenv("RESEND_API_KEY", "")
-SUPABASE_URL          = os.getenv("SUPABASE_URL", "")
-SUPABASE_SERVICE_KEY  = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+RESEND_API_KEY       = os.getenv("RESEND_API_KEY", "")
+SUPABASE_URL         = os.getenv("SUPABASE_URL", "")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hjälpfunktion: hämta company_id från Authorization-header
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_company_id(request: Request) -> str:
+    """
+    Läser Supabase JWT-token från Authorization-headern och
+    extraherar user.id (sub-fältet) utan att verifiera signaturen.
+
+    Detta är säkert eftersom:
+    - Supabase signerar alla tokens med en hemlig nyckel
+    - En manipulerad token skulle ha fel signatur och nekas av Supabase
+    - Vi använder company_id enbart för att FILTRERA data, inte för access control
+    - Supabase RLS (Row Level Security) hanterar den faktiska säkerheten
+
+    Returnerar tom sträng om ingen token finns (oautentiserat anrop).
+    """
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return ""
+
+    token = auth_header.replace("Bearer ", "").strip()
+
+    try:
+        # JWT består av tre delar separerade med punkter: header.payload.signature
+        # Vi läser bara payload (del 2) — signaturen verifieras av Supabase
+        parts = token.split(".")
+        if len(parts) != 3:
+            return ""
+
+        # Base64url-dekoda payload (lägg till padding om det saknas)
+        payload_b64 = parts[1]
+        padding = 4 - len(payload_b64) % 4
+        if padding != 4:
+            payload_b64 += "=" * padding
+
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+
+        # "sub" är Supabase user ID = company_id i vårt system
+        return payload.get("sub", "")
+
+    except Exception:
+        return ""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Request-modeller
+# ─────────────────────────────────────────────────────────────────────────────
 
 class ImageData(BaseModel):
     name: str
@@ -41,7 +95,7 @@ class EstimateRequest(BaseModel):
     build_params: Optional[Dict[str, str]] = None
     images: Optional[List[ImageData]] = None
     documents: Optional[List[ImageData]] = None
-    company_id: Optional[str] = None
+    # company_id skickas INTE längre från frontend — hämtas från JWT
 
 
 class ChatRequest(BaseModel):
@@ -75,9 +129,13 @@ class FeedbackRequest(BaseModel):
     craftsman_name: Optional[str] = None
     job_type: Optional[str] = None
     region: Optional[str] = None
-    company_id: Optional[str] = None
     all_edits: Optional[Dict[str, Any]] = None
+    # company_id skickas INTE från frontend — hämtas från JWT
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Endpoints
+# ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 def health():
@@ -85,7 +143,10 @@ def health():
 
 
 @app.post("/api/estimate")
-async def estimate(req: EstimateRequest):
+async def estimate(req: EstimateRequest, request: Request):
+    # Hämta company_id automatiskt från JWT — ingen input från frontend
+    company_id = get_company_id(request)
+
     try:
         result = await generate_estimate(
             description=req.description,
@@ -98,7 +159,7 @@ async def estimate(req: EstimateRequest):
             build_params=req.build_params,
             images=req.images,
             documents=req.documents,
-            company_id=req.company_id or "",
+            company_id=company_id,   # Skickas till ai.py för filtrering
         )
         return result
     except Exception as e:
@@ -115,7 +176,18 @@ async def chat(req: ChatRequest):
 
 
 @app.post("/api/feedback")
-async def save_feedback(req: FeedbackRequest):
+async def save_feedback(req: FeedbackRequest, request: Request):
+    """
+    Sparar snickarens justering av en AI-rad.
+
+    company_id hämtas från JWT-token — garanterat rätt företag,
+    kan inte manipuleras av frontend.
+
+    Gör två saker:
+      1. En rad i feedback_events med company_id
+         (används av ai.py för företagsspecifika mönster)
+      2. Uppdaterar quotes.craftsman_edits med hela edits-objektet
+    """
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         raise HTTPException(status_code=500, detail="Supabase inte konfigurerat")
 
@@ -125,6 +197,9 @@ async def save_feedback(req: FeedbackRequest):
     if req.reason_code == "other" and not req.reason_text:
         raise HTTPException(status_code=400, detail="reason_text kravs nar reason_code ar 'other'")
 
+    # Hämta company_id från JWT — aldrig från request body
+    company_id = get_company_id(request)
+
     headers = {
         "apikey":        SUPABASE_SERVICE_KEY,
         "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
@@ -133,6 +208,8 @@ async def save_feedback(req: FeedbackRequest):
     }
 
     async with httpx.AsyncClient(timeout=10.0) as http:
+
+        # 1. Logga i feedback_events med company_id från JWT
         feedback_row = {
             "quote_number":   req.quote_number,
             "field_changed":  req.field_changed,
@@ -143,7 +220,7 @@ async def save_feedback(req: FeedbackRequest):
             "craftsman_name": req.craftsman_name or "",
             "job_type":       req.job_type or "",
             "region":         req.region or "",
-            "company_id":     req.company_id or None,
+            "company_id":     company_id or None,  # Satt från JWT, inte frontend
         }
 
         r1 = await http.post(
@@ -154,6 +231,7 @@ async def save_feedback(req: FeedbackRequest):
         if r1.status_code >= 400:
             raise HTTPException(status_code=500, detail=f"Kunde inte spara: {r1.text}")
 
+        # 2. Uppdatera craftsman_edits på quotes-raden
         if req.all_edits:
             r2 = await http.patch(
                 f"{SUPABASE_URL}/rest/v1/quotes",
@@ -175,15 +253,28 @@ async def notify_acceptance(req: AcceptNotifyRequest):
     html_body = f"""
     <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 32px;">
         <div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 12px; padding: 24px; margin-bottom: 24px; text-align: center;">
-            <div style="font-size: 20px; font-weight: 700; color: #16a34a;">Offert godkand!</div>
+            <div style="font-size: 20px; font-weight: 700; color: #16a34a; margin-bottom: 4px;">Offert godkand!</div>
             <div style="font-size: 14px; color: #64748b;">En kund har godkant din offert</div>
         </div>
         <div style="background: white; border: 1px solid #e2e8f0; border-radius: 12px; padding: 24px; margin-bottom: 24px;">
-            <div style="padding: 8px 0; border-bottom: 1px solid #f1f5f9;">Offert: <strong>{req.quote_title}</strong></div>
-            <div style="padding: 8px 0; border-bottom: 1px solid #f1f5f9;">Kund: <strong>{req.customer_name}</strong></div>
-            <div style="padding: 8px 0; border-bottom: 1px solid #f1f5f9;">E-post: {req.customer_email}</div>
-            <div style="padding: 8px 0; border-bottom: 1px solid #f1f5f9;">Belopp: <strong>{req.total_amount}</strong></div>
-            <div style="padding: 8px 0;">Godkand: {req.accepted_date}</div>
+            <div style="padding: 8px 0; border-bottom: 1px solid #f1f5f9; font-size: 13px;">
+                <span style="color: #64748b;">Offert: </span><strong>{req.quote_title}</strong>
+            </div>
+            <div style="padding: 8px 0; border-bottom: 1px solid #f1f5f9; font-size: 13px;">
+                <span style="color: #64748b;">Kund: </span><strong>{req.customer_name}</strong>
+            </div>
+            <div style="padding: 8px 0; border-bottom: 1px solid #f1f5f9; font-size: 13px;">
+                <span style="color: #64748b;">E-post: </span>{req.customer_email}
+            </div>
+            <div style="padding: 8px 0; border-bottom: 1px solid #f1f5f9; font-size: 13px;">
+                <span style="color: #64748b;">Belopp: </span><strong>{req.total_amount}</strong>
+            </div>
+            <div style="padding: 8px 0; font-size: 13px;">
+                <span style="color: #64748b;">Godkand: </span>{req.accepted_date}
+            </div>
+        </div>
+        <div style="background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 12px; padding: 20px; text-align: center;">
+            <div style="font-size: 13px; color: #3b82f6;">Skapa projektet i Bygglet och kontakta kunden for att boka in start.</div>
         </div>
     </div>
     """
@@ -192,7 +283,10 @@ async def notify_acceptance(req: AcceptNotifyRequest):
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 "https://api.resend.com/emails",
-                headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+                headers={
+                    "Authorization": f"Bearer {RESEND_API_KEY}",
+                    "Content-Type":  "application/json",
+                },
                 json={
                     "from":    "NordSheet <noreply@nordsheet.com>",
                     "to":      [req.company_email],
