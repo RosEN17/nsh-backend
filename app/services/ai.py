@@ -62,34 +62,52 @@ SVARA ALLTID med exakt denna JSON-struktur (inget annat):
   "estimated_days": 5,
   "categories": [
     {
-      "name": "Kategorinamn",
+      "name": "Rivning",
       "rows": [
-        {"description": "Beskrivning", "note": "Kort not", "unit": "timmar", "quantity": 10, "unit_price": 650, "total": 6500, "type": "labor"}
+        {"description": "Rivning kakel vägg", "note": "18 kvm × 0.8 h/kvm", "unit": "timmar", "quantity": 14.5, "unit_price": 850, "total": 12325, "type": "labor"},
+        {"description": "Kakelfix Weber Flex 25kg", "note": "Material för kakelsättning", "unit": "säck", "quantity": 3, "unit_price": 280, "total": 840, "type": "material"}
       ],
-      "subtotal": 6500
+      "subtotal": 13165
     }
   ],
   "totals": {
-    "material_total": 0,
-    "labor_total": 0,
+    "material_total": 840,
+    "labor_total": 12325,
     "equipment_total": 0,
-    "subtotal_ex_vat": 0,
-    "margin_amount": 0,
-    "total_ex_vat": 0,
-    "vat": 0,
-    "total_inc_vat": 0,
-    "rot_deduction": 0,
-    "customer_pays": 0
+    "subtotal_ex_vat": 13165,
+    "margin_amount": 1975,
+    "total_ex_vat": 15140,
+    "vat": 3785,
+    "total_inc_vat": 18925,
+    "rot_deduction": 3698,
+    "customer_pays": 15227
   },
   "meta": {
-    "hourly_rate": 650,
+    "hourly_rate": 850,
     "margin_pct": 15,
     "area_sqm": 8,
     "rot_applied": true
   },
   "warnings": ["Eventuella varningar"],
   "assumptions": ["Antaganden som gjorts"]
-}"""
+}
+
+KRITISKT OM TOTALS:
+- material_total = summan av ALLA rader med type="material"
+- labor_total = summan av ALLA rader med type="labor"
+- subtotal_ex_vat = material_total + labor_total + equipment_total
+- margin_amount = subtotal_ex_vat × (margin_pct / 100)
+- total_ex_vat = subtotal_ex_vat + margin_amount
+- vat = total_ex_vat × 0.25
+- total_inc_vat = total_ex_vat + vat
+- rot_deduction = labor_total × 0.30 (om rot_applied = true, annars 0)
+- customer_pays = total_inc_vat - rot_deduction
+- Skriv ALDRIG 0 i material_total om det finns materialrader — räkna ihop dem
+
+MATERIAL SKA ALLTID INKLUDERAS:
+- Även om kunden tillhandahåller kakel: lägg alltid in container, tätskikt, kakelfix, fog, silikon, VVS-material, el-material
+- Varje kategori som har arbete ska också ha tillhörande materialrader
+- type="material" för alla materialrader, type="labor" för arbete"""
 
 
 async def fetch_norms(job_type: str, house_age: str = "all") -> str:
@@ -286,6 +304,65 @@ def _detect_house_age(build_params: Optional[Dict[str, str]]) -> str:
         return "all"
 
 
+def recalculate_totals(data: dict, hourly_rate: float, margin_pct: float, include_rot: bool) -> dict:
+    """
+    Räknar alltid om totals deterministiskt från raderna.
+    Litar aldrig på att AI:n räknat rätt — detta är källan till sanning.
+    """
+    material_total   = 0.0
+    labor_total      = 0.0
+    equipment_total  = 0.0
+
+    for cat in data.get("categories", []):
+        cat_subtotal = 0.0
+        for row in cat.get("rows", []):
+            # Räkna om radsumman deterministiskt
+            qty   = float(row.get("quantity", 0) or 0)
+            price = float(row.get("unit_price", 0) or 0)
+            total = round(qty * price)
+            row["total"] = total
+            cat_subtotal += total
+
+            t = row.get("type", "labor")
+            if t == "material":
+                material_total  += total
+            elif t == "equipment":
+                equipment_total += total
+            else:
+                labor_total += total
+
+        cat["subtotal"] = round(cat_subtotal)
+
+    margin_pct_val   = float(margin_pct or 15)
+    subtotal         = material_total + labor_total + equipment_total
+    margin_amount    = round(subtotal * margin_pct_val / 100)
+    total_ex_vat     = round(subtotal + margin_amount)
+    vat              = round(total_ex_vat * 0.25)
+    total_inc_vat    = round(total_ex_vat + vat)
+    rot_deduction    = round(labor_total * 0.30) if include_rot else 0
+    customer_pays    = round(total_inc_vat - rot_deduction)
+
+    data["totals"] = {
+        "material_total":   round(material_total),
+        "labor_total":      round(labor_total),
+        "equipment_total":  round(equipment_total),
+        "subtotal_ex_vat":  total_ex_vat,
+        "margin_amount":    margin_amount,
+        "total_ex_vat":     total_ex_vat,
+        "vat":              vat,
+        "total_inc_vat":    total_inc_vat,
+        "rot_deduction":    rot_deduction,
+        "customer_pays":    customer_pays,
+    }
+    data["meta"] = {
+        **data.get("meta", {}),
+        "hourly_rate": float(hourly_rate or 650),
+        "margin_pct":  margin_pct_val,
+        "rot_applied": include_rot,
+    }
+    return data
+
+
 async def generate_estimate(
     description: str,
     job_type: Optional[str] = None,
@@ -356,7 +433,17 @@ async def generate_estimate(
         )
 
         raw = response.choices[0].message.content or "{}"
-        return json.loads(raw)
+        data = json.loads(raw)
+
+        # Räkna alltid om totals deterministiskt från raderna
+        # — litar aldrig på AI:ns egna summor
+        data = recalculate_totals(
+            data,
+            hourly_rate=hourly_rate or 650,
+            margin_pct=margin_pct or 15,
+            include_rot=include_rot,
+        )
+        return data
 
     except json.JSONDecodeError as e:
         raise ValueError(f"AI returnerade ogiltig JSON: {e}")
