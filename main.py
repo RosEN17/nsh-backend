@@ -53,7 +53,6 @@ def get_user_id(request: Request) -> str:
         if len(parts) != 3:
             return ""
 
-        # Dekoda JWT payload (del 2)
         payload_b64 = parts[1]
         padding = 4 - len(payload_b64) % 4
         if padding != 4:
@@ -69,14 +68,6 @@ def get_user_id(request: Request) -> str:
 async def get_company_id(user_id: str) -> str:
     """
     Slår upp companies-tabellen med user_id och returnerar company_id (UUID).
-
-    Detta är den rätta kopplingen:
-      auth.users.id (user_id) → companies.id (company_id)
-
-    company_id används sedan för att:
-      - Filtrera feedback_events så bara detta företags mönster
-        påverkar dess kalkyler
-      - Koppla feedback_events-rader till rätt företag
     """
     if not user_id or not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         return ""
@@ -122,10 +113,10 @@ class EstimateRequest(BaseModel):
     hourly_rate: Optional[float] = 650
     include_rot: bool = True
     margin_pct: Optional[float] = 15
+    ue_markup_pct: Optional[float] = 12.5  # Påslag på underentreprenörer
     build_params: Optional[Dict[str, str]] = None
     images: Optional[List[ImageData]] = None
     documents: Optional[List[ImageData]] = None
-    # Ingen company_id här — hämtas automatiskt från JWT + companies-tabellen
 
 
 class ChatRequest(BaseModel):
@@ -160,7 +151,6 @@ class FeedbackRequest(BaseModel):
     job_type: Optional[str] = None
     region: Optional[str] = None
     all_edits: Optional[Dict[str, Any]] = None
-    # Ingen company_id här — hämtas från JWT + companies-tabellen
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -174,10 +164,7 @@ def health():
 
 @app.post("/api/estimate")
 async def estimate(req: EstimateRequest, request: Request):
-    # 1. Hämta user_id från JWT
     user_id = get_user_id(request)
-
-    # 2. Slå upp company_id i companies-tabellen
     company_id = await get_company_id(user_id)
 
     try:
@@ -189,6 +176,7 @@ async def estimate(req: EstimateRequest, request: Request):
             hourly_rate=req.hourly_rate or 650,
             include_rot=req.include_rot,
             margin_pct=req.margin_pct or 15,
+            ue_markup_pct=req.ue_markup_pct or 12.5,
             build_params=req.build_params,
             images=req.images,
             documents=req.documents,
@@ -210,16 +198,6 @@ async def chat(req: ChatRequest):
 
 @app.post("/api/feedback")
 async def save_feedback(req: FeedbackRequest, request: Request):
-    """
-    Sparar snickarens justering.
-
-    company_id hämtas automatiskt:
-      JWT → user_id → companies.id → company_id
-
-    Sparar till:
-      1. feedback_events (med company_id) — för AI-mönsteranalys
-      2. quotes.craftsman_edits (snapshot) — för offerthistorik
-    """
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         raise HTTPException(status_code=500, detail="Supabase inte konfigurerat")
 
@@ -229,7 +207,6 @@ async def save_feedback(req: FeedbackRequest, request: Request):
     if req.reason_code == "other" and not req.reason_text:
         raise HTTPException(status_code=400, detail="reason_text kravs nar reason_code ar 'other'")
 
-    # Hämta company_id automatiskt från JWT
     user_id    = get_user_id(request)
     company_id = await get_company_id(user_id)
 
@@ -242,7 +219,6 @@ async def save_feedback(req: FeedbackRequest, request: Request):
 
     async with httpx.AsyncClient(timeout=10.0) as http:
 
-        # 1. Logga i feedback_events med company_id
         feedback_row = {
             "quote_number":   req.quote_number,
             "field_changed":  req.field_changed,
@@ -262,10 +238,8 @@ async def save_feedback(req: FeedbackRequest, request: Request):
             json=feedback_row,
         )
         if r1.status_code >= 400:
-            # Logga men krascha inte — tabellen kanske inte finns ännu
             print(f"Varning: feedback_events sparades inte: {r1.status_code} {r1.text}")
 
-        # 2. Uppdatera craftsman_edits på quotes-raden
         if req.all_edits:
             r2 = await http.patch(
                 f"{SUPABASE_URL}/rest/v1/quotes",
