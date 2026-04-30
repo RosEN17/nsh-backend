@@ -45,10 +45,14 @@ VIKTIGT OM BYGGPARAMETRAR:
 - Om plats anges: justera priser (Stockholm +12%, Göteborg +6%, övriga Sverige 0%)
 - Om byggår/hustyp anges: äldre byggnader (pre-1975) kan ha asbest — lägg till varning och saneringspost
 
-VIKTIGT OM BILDER:
-- Om projektbilder bifogas: analysera dem för att förstå nuvarande skick, material, storlek och problem
-- Nämn i job_summary vad du ser i bilderna som påverkar kalkylen
-- Om skador eller avvikelser syns: lägg till extra poster och/eller varningar
+VIKTIGT OM BILDER — RITNINGAR OCH ANTECKNINGAR:
+- Om PNG-bilder bifogas: behandla dem som ritningar eller handskrivna anteckningar
+- Läs av ALL text, mått, siffror och dimensioner i bilden noggrant
+- Mått i ritningar (t.ex. "2400", "3600") är i millimeter om inget annat anges
+- Extrahera: rumsbredd, rumslängd, takhöjd, fönster- och dörrmått om de syns
+- Nämn i job_summary exakt vilka mått du läst av från ritningen
+- Om handskrivna anteckningar: läs av allt som är relevant för jobbet
+- Om JPEG-bilder (foton): analysera nuvarande skick, material och eventuella skador
 
 VIKTIGT OM PDF-UNDERLAG OCH RITNINGAR:
 - Om PDF-innehåll bifogas: läs noggrant igenom det — det kan vara ett mail med kundens krav, en offertförfrågan eller en specifikation
@@ -407,10 +411,15 @@ async def generate_estimate(
         content_parts: List[dict] = [{"type": "text", "text": user_text}]
         for img in all_images[:8]:
             data = img.data if hasattr(img, "data") else img.get("data", "")
+            name = img.name if hasattr(img, "name") else img.get("name", "")
             if data:
+                # Frontend prefixar ritningar med "[RITNING]" — använd high detail
+                # Projektfoton — low detail räcker
+                is_drawing = name.startswith("[RITNING]")
+                detail = "high" if is_drawing else "low"
                 content_parts.append({
                     "type": "image_url",
-                    "image_url": {"url": data, "detail": "low"},
+                    "image_url": {"url": data, "detail": detail},
                 })
         names = [
             (img.name if hasattr(img, "name") else img.get("name", "bild"))
