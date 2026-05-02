@@ -1,13 +1,37 @@
 """
 NordSheet AI — Kalkylgenerering med GPT-4o
-Hämtar arbetstidsnormer från Supabase och injicerar i system-prompten.
+═══════════════════════════════════════════════════════════════════════
+
+ARKITEKTUR — "PRISLÅDAN"
+  AI:n får aldrig gissa priser. Backend hämtar en komplett "prislåda" från
+  Supabase som innehåller exakt vilka priser som gäller för det här jobbet.
+
+  För varje offertrad sätter AI:n en source_id som pekar tillbaka på
+  databasraden den hämtade priset från. Detta gör felsökning trivial:
+  när en kalkyl är fel kan ni se exakt vilken databasrad som var källan.
+
+DATAMODELL
+  En enda Postgres-RPC `get_pricing_context(job_type, company_id, quality, region)`
+  returnerar ett JSON-objekt med 7 sektioner:
+    - work_norms          (timmar per moment)
+    - material_prices     (kr per material)
+    - subcontractor_prices (UE-priser)
+    - disposal_costs      (container, deponi)
+    - equipment_rental    (ställning, skylift, riktiga hyrmaskiner)
+    - overhead_costs      (etablering, frakt, resor, trängselskatt)
+    - regional            (lönfaktor, materialfaktor, trängselskatt)
+
+JOBBTYPER
+  Initialt fokus: rivning, fasad, altan
+  Datamodellen stöder fler — bara seedade rader saknas.
 """
 
 import json
 import os
 import base64
 import io
-from typing import Optional, Dict, List
+import re
+from typing import Optional, Dict, List, Tuple
 from openai import AsyncOpenAI
 import httpx
 
@@ -16,177 +40,276 @@ client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 
-SYSTEM_PROMPT = """Du är en erfaren svensk byggkalkylator-AI. Du genererar detaljerade kostnadskalkyler för hantverksjobb i Sverige.
+# Andel av UE-pris som räknas som arbete (resten är material/marginal hos UE)
+UE_LABOR_SHARE = 0.60
 
-REGLER:
+
+# ═════════════════════════════════════════════════════════════════════
+# SYSTEM-PROMPT — nu med tydliga regler om prislådan
+# ═════════════════════════════════════════════════════════════════════
+SYSTEM_PROMPT_BASE = """Du är en erfaren svensk byggkalkylator-AI. Du genererar detaljerade kostnadskalkyler för hantverksjobb i Sverige.
+
+GRUNDREGLER:
 - Alla priser i SEK
-- Använd realistiska svenska materialpriser (2025-2026)
-- Arbete räknas i timmar x timpriset som anges
-- Inkludera alltid rivning/demontering om det är en renovering
-- Inkludera förberedelse (tätskikt, primning etc.)
-- Inkludera efterarbete (städning, slutbesiktning)
-- Varje rad ska ha: description, note (kort förklaring), unit (timmar/kvm/st/meter/kg), quantity, unit_price, total, type (labor/material/equipment)
-- Gruppera i kategorier (Rivning, Förberedelse, Installation, Material, Efterarbete etc.)
-- Varje kategori har: name, rows[], subtotal
+- Eget arbete räknas i timmar × timpris
+- Gruppera kalkylen i logiska kategorier
+- Varje rad har: description, note, unit, quantity, unit_price, total, type, source_id
 
-KRITISKT — ARBETSTIDSNORMER:
-- Normdatabasen nedan anger exakt hur många timmar varje moment tar per enhet
-- Du MÅSTE räkna timmar från normdatabasen — aldrig från magkänsla eller generella antaganden
-- Multiplikation: norm (h/enhet) × antal enheter = timmar för momentet
-- Avrunda alltid uppåt till närmaste halvtimme
-- Om ett moment saknas i normdatabasen: använd närmaste liknande norm och notera det
+═══ VIKTIGAST: PRISLÅDAN ═══
+Du får en komplett prislåda från databasen nedan. Den innehåller ALLA priser
+du behöver. REGEL: gissa ALDRIG priser eller timmar. Hämta från prislådan.
 
-VIKTIGT OM BYGGPARAMETRAR:
-- Använd ALLA parametrar som anges — mått, checkboxar, jobbtyp — för att göra kalkylen exakt
-- Om takhöjd anges: beräkna väggyta = (2 × (bredd + längd)) × takhöjd
-- Om golvyta anges: beräkna material med 10-12% spill
-- Om antal kaklade väggar och kakelhöjd anges: beräkna exakt kakelyta
-- Om "ingår i jobbet" anger specifika moment: inkludera dessa som egna rader i kalkylen
-- Om plats anges: justera priser (Stockholm +12%, Göteborg +6%, övriga Sverige 0%)
-- Om byggår/hustyp anges: äldre byggnader (pre-1975) kan ha asbest — lägg till varning och saneringspost
+För varje rad du skapar:
+1. Hitta motsvarande post i prislådan
+2. Sätt "source_id" till den postens id
+3. Använd exakt det priset/normen — modifiera bara quantity baserat på jobbets storlek
 
-VIKTIGT OM BILDER — RITNINGAR OCH ANTECKNINGAR:
-- Om PNG-bilder bifogas: behandla dem som ritningar eller handskrivna anteckningar
-- Läs av ALL text, mått, siffror och dimensioner i bilden noggrant
-- Mått i ritningar (t.ex. "2400", "3600") är i millimeter om inget annat anges
-- Extrahera: rumsbredd, rumslängd, takhöjd, fönster- och dörrmått om de syns
-- Nämn i job_summary exakt vilka mått du läst av från ritningen
-- Om handskrivna anteckningar: läs av allt som är relevant för jobbet
-- Om JPEG-bilder (foton): analysera nuvarande skick, material och eventuella skador
+Om du inte hittar matchande post i prislådan: lägg raden ändå med
+source_id="ESTIMATED" och en tydlig note som förklarar varför du gissade.
+Detta är en signal till oss att lägga in den posten i databasen.
 
-VIKTIGT OM PDF-UNDERLAG OCH RITNINGAR:
-- Om PDF-innehåll bifogas: läs noggrant igenom det — det kan vara ett mail med kundens krav, en offertförfrågan eller en specifikation
-- Extrahera all relevant information: mått, materialval, specifika krav, tidsramar, adress
-- Prioritera information från PDF:en framför generella antaganden
+═══ RADTYPER ═══
+- type="labor"         → eget arbete (debiteras hourly_rate)
+- type="material"      → material som vi köper
+- type="subcontractor" → underentreprenör (annan firma utför)
+- type="equipment"     → hyrutrustning (ställning, skylift etc.)
+- type="disposal"      → container, deponi, bortforsling
+- type="overhead"      → etablering, frakt, resor, trängselskatt
 
-SVARA ALLTID med exakt denna JSON-struktur (inget annat):
+═══ KATEGORISTRUKTUR ═══
+Använd dessa kategorinamn när relevant:
+- "Etablering & resa"
+- "Rivning" (om något ska rivas)
+- "Förberedelse"
+- "Stomme & konstruktion"
+- "Ytskikt & material"
+- "Underentreprenörer"
+- "Sophantering & deponi"
+- "Hyrutrustning"
+- "Efterarbete"
+
+═══ VIKTIGT OM CHECKBOXAR I "INGÅR I JOBBET" ═══
+Listan i "ingår_i_jobbet" är arbetsmoment som SKA finnas som rader.
+Hoppa ALDRIG över ett moment som står där.
+
+═══ VIKTIGT OM ANTECKNINGAR PÅ RITNINGAR ═══
+- Handskrivna anteckningar är direkta arbetsmoment, inte förslag
+- Varje punkt → minst en rad i kalkylen
+- "Ej Deponi" / "Ej Rivning" / "Ej inredning" = hoppa över de delarna
+- Mått som "2,2 × 3,4" är METER när siffrorna är < 100. Aldrig mm.
+- "TH 2,48" = takhöjd 2,48 m
+
+═══ MÅTTBERÄKNING ═══
+- Om "room_dimensions" anges (B×L i meter): räkna golvyta = B × L
+- Räkna omkrets = 2 × (B + L)
+- Räkna väggyta = omkrets × takhöjd
+- Använd UTRÄKNADE värden — INTE float-fältet "floor_sqm" om båda finns
+
+═══ JSON-STRUKTUR ═══
 {
   "job_title": "Kort titel",
-  "job_summary": "Sammanfattning av jobbet inkl. vad du sett i underlag/bilder",
+  "job_summary": "Sammanfattning inkl. EXAKT vilka mått du läst",
   "estimated_days": 5,
   "categories": [
     {
-      "name": "Rivning",
+      "name": "Etablering & resa",
       "rows": [
-        {"description": "Rivning kakel vägg", "note": "18 kvm × 0.8 h/kvm", "unit": "timmar", "quantity": 14.5, "unit_price": 850, "total": 12325, "type": "labor"},
-        {"description": "Kakelfix Weber Flex 25kg", "note": "Material för kakelsättning", "unit": "säck", "quantity": 3, "unit_price": 280, "total": 840, "type": "material"}
+        {"description": "Etablering arbetsplats", "note": "Uppställning första dagen", "unit": "post", "quantity": 1, "unit_price": 2500, "total": 2500, "type": "overhead", "source_id": "uuid-från-prislåda"}
       ],
-      "subtotal": 13165
+      "subtotal": 2500
     }
   ],
-  "totals": {
-    "material_total": 840,
-    "labor_total": 12325,
-    "equipment_total": 0,
-    "subtotal_ex_vat": 13165,
-    "margin_amount": 1975,
-    "total_ex_vat": 15140,
-    "vat": 3785,
-    "total_inc_vat": 18925,
-    "rot_deduction": 3698,
-    "customer_pays": 15227
-  },
-  "meta": {
-    "hourly_rate": 850,
-    "margin_pct": 15,
-    "area_sqm": 8,
-    "rot_applied": true
-  },
-  "warnings": ["Eventuella varningar"],
-  "assumptions": ["Antaganden som gjorts"]
+  "totals": {},
+  "meta": {},
+  "warnings": [],
+  "assumptions": []
 }
 
-KRITISKT OM TOTALS:
-- material_total = summan av ALLA rader med type="material"
-- labor_total = summan av ALLA rader med type="labor"
-- subtotal_ex_vat = material_total + labor_total + equipment_total
-- margin_amount = subtotal_ex_vat × (margin_pct / 100)
-- total_ex_vat = subtotal_ex_vat + margin_amount
-- vat = total_ex_vat × 0.25
-- total_inc_vat = total_ex_vat + vat
-- rot_deduction = labor_total × 0.30 (om rot_applied = true, annars 0)
-- customer_pays = total_inc_vat - rot_deduction
-- Skriv ALDRIG 0 i material_total om det finns materialrader — räkna ihop dem
-
-MATERIAL SKA ALLTID INKLUDERAS:
-- Även om kunden tillhandahåller kakel: lägg alltid in container, tätskikt, kakelfix, fog, silikon, VVS-material, el-material
-- Varje kategori som har arbete ska också ha tillhörande materialrader
-- type="material" för alla materialrader, type="labor" för arbete"""
+OBS: "totals" och "meta" lämnas tomma — backend räknar deterministiskt."""
 
 
-async def fetch_norms(job_type: str, house_age: str = "all") -> str:
-    """Hämta arbetstidsnormer från Supabase och returnera som prompttext."""
+# ═════════════════════════════════════════════════════════════════════
+# Hämta prislådan från Supabase via RPC
+# ═════════════════════════════════════════════════════════════════════
+async def fetch_pricing_context(
+    job_type: str,
+    company_id: Optional[str] = None,
+    quality: str = "standard",
+    region: str = "default",
+) -> dict:
+    """
+    Anropar Postgres-funktionen get_pricing_context som returnerar
+    hela prislådan i ett enda anrop.
+    """
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-        return ""
+        return _empty_pricing_context()
 
     try:
-        # Normalisera jobbtyp — matcha mot tabellens job_type-värden
-        type_map = {
-            "badrum": "badrum", "bathroom": "badrum",
-            "kok": "kok", "kök": "kok", "kitchen": "kok",
-            "tak": "tak", "roof": "tak",
-            "fasad": "fasad", "facade": "fasad",
-            "golv": "golv", "floor": "golv",
-            "malning": "malning", "målning": "malning", "painting": "malning",
-        }
-        db_type = type_map.get(job_type.lower(), job_type.lower())
-
-        async with httpx.AsyncClient(timeout=5.0) as http:
-            r = await http.get(
-                f"{SUPABASE_URL}/rest/v1/work_norms",
-                params={
-                    "job_type": f"eq.{db_type}",
-                    "select": "label,hours_per,unit,house_age,region",
-                    "order": "moment",
-                },
+        async with httpx.AsyncClient(timeout=8.0) as http:
+            r = await http.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/get_pricing_context",
                 headers={
-                    "apikey": SUPABASE_SERVICE_KEY,
+                    "apikey":        SUPABASE_SERVICE_KEY,
                     "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                    "Content-Type":  "application/json",
+                },
+                json={
+                    "p_job_type":   job_type,
+                    "p_company_id": company_id or None,
+                    "p_quality":    quality,
+                    "p_region":     region,
                 },
             )
+        if r.status_code == 200:
+            data = r.json() or {}
+            # Säkerställ att alla nycklar finns med tomma listor om null
+            for key in ["work_norms", "material_prices", "subcontractor_prices",
+                        "disposal_costs", "equipment_rental", "overhead_costs"]:
+                if data.get(key) is None:
+                    data[key] = []
+            if data.get("regional") is None:
+                data["regional"] = {"region": "default", "labor_factor": 1, "material_factor": 1, "ue_factor": 1, "congestion_per_day": 0}
+            return data
+    except Exception as e:
+        print(f"fetch_pricing_context fel: {e}")
 
-        if r.status_code != 200:
-            return ""
-
-        norms = r.json()
-        if not norms:
-            return ""
-
-        # Filtrera på husålder — ta alltid "all", plus specifik ålder om angiven
-        relevant = [
-            n for n in norms
-            if n["house_age"] == "all" or n["house_age"] == house_age
-        ]
-
-        # Om äldre hus finns mer specifik norm — ta den istället för "all"
-        if house_age != "all":
-            seen = {}
-            for n in relevant:
-                key = n["label"]
-                if key not in seen or n["house_age"] == house_age:
-                    seen[key] = n
-            relevant = list(seen.values())
-
-        lines = [
-            f"\nARBETSTIDSNORMER FÖR {db_type.upper()} "
-            f"(MÅSTE ANVÄNDAS — RÄKNA ALDRIG UTAN DESSA):"
-        ]
-        for n in relevant:
-            lines.append(f"  {n['label']}: {n['hours_per']} timmar per {n['unit']}")
-
-        lines.append(
-            "\nBEREKNING: norm × antal enheter = timmar. "
-            "Avrunda uppåt till närmaste 0.5 timme."
-        )
-        return "\n".join(lines)
-
-    except Exception:
-        # Om Supabase inte svarar — fortsätt utan normer
-        return ""
+    return _empty_pricing_context()
 
 
+def _empty_pricing_context() -> dict:
+    return {
+        "work_norms": [], "material_prices": [], "subcontractor_prices": [],
+        "disposal_costs": [], "equipment_rental": [], "overhead_costs": [],
+        "regional": {"region": "default", "labor_factor": 1, "material_factor": 1, "ue_factor": 1, "congestion_per_day": 0},
+    }
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Formatera prislådan som prompt-text
+# ═════════════════════════════════════════════════════════════════════
+def _format_pricing_for_prompt(ctx: dict) -> str:
+    """Bygger en strukturerad sektion till AI:ns prompt med all prislådan."""
+    parts = ["\n\n═══════════════════════════════════════════════════════════════════"]
+    parts.append("PRISLÅDA FÖR DETTA JOBB — ANVÄND DESSA EXAKT, GISSA ALDRIG PRISER")
+    parts.append("═══════════════════════════════════════════════════════════════════")
+
+    # ── Arbetstidsnormer ──
+    if ctx["work_norms"]:
+        parts.append("\n── ARBETSTIDSNORMER (timmar per enhet) ──")
+        for n in ctx["work_norms"]:
+            scope_part = f" [{n['scope']}]" if n.get('scope') and n['scope'] != 'standard' else ""
+            note_part  = f" ({n['notes']})" if n.get('notes') else ""
+            parts.append(f"  id={n['id']} | {n['label']}{scope_part}: {n['hours_per']} h/{n['unit']}{note_part}")
+    else:
+        parts.append("\n── ARBETSTIDSNORMER: (inga normer i databasen för denna jobbtyp) ──")
+
+    # ── Materialpriser ──
+    if ctx["material_prices"]:
+        parts.append("\n── MATERIALPRISER (kr per enhet) ──")
+        for m in ctx["material_prices"]:
+            quality = f" [{m['quality_tier']}]" if m.get('quality_tier') else ""
+            parts.append(f"  id={m['id']} | {m['label']}{quality}: {m['price']} kr/{m['unit']}")
+
+    # ── Underentreprenörer ──
+    if ctx["subcontractor_prices"]:
+        parts.append("\n── UNDERENTREPRENÖRSPRISER ──")
+        for s in ctx["subcontractor_prices"]:
+            parts.append(f"  id={s['id']} | [{s['trade']}/{s['scope']}] {s['description']}: {s['price']} kr/{s['unit']}")
+
+    # ── Sophantering ──
+    if ctx["disposal_costs"]:
+        parts.append("\n── SOPHANTERING & DEPONI ──")
+        for d in ctx["disposal_costs"]:
+            cat = f" [{d['category']}]" if d.get('category') else ""
+            parts.append(f"  id={d['id']} | {d['label']}{cat}: {d['price']} kr/{d['unit']}")
+
+    # ── Hyrutrustning ──
+    if ctx["equipment_rental"]:
+        parts.append("\n── HYRUTRUSTNING (bara saker som faktiskt hyrs — sågar etc. äger företaget) ──")
+        for e in ctx["equipment_rental"]:
+            parts.append(f"  id={e['id']} | {e['label']}: {e['price']} kr/{e['unit']}")
+
+    # ── Overhead (etablering, resor, frakt) ──
+    if ctx["overhead_costs"]:
+        parts.append("\n── ETABLERING, RESOR, FRAKT, TRÄNGSELSKATT ──")
+        parts.append("  (backend lägger in dessa automatiskt baserat på jobbets storlek)")
+        for o in ctx["overhead_costs"]:
+            trigger = f" [endast om: {o['trigger_rule']}]" if o.get('trigger_rule') else ""
+            parts.append(f"  id={o['id']} | {o['label']} ({o['calc_type']}): {o['rate']} {o['unit']}{trigger}")
+
+    # ── Regional ──
+    r = ctx["regional"]
+    parts.append(f"\n── REGION: {r['region']} ──")
+    parts.append(f"  Arbete-faktor: {r['labor_factor']}, Material-faktor: {r['material_factor']}, UE-faktor: {r['ue_factor']}")
+    if float(r.get('congestion_per_day') or 0) > 0:
+        parts.append(f"  Trängselskatt: {r['congestion_per_day']} kr/arbetsdag")
+
+    parts.append("\n═══════════════════════════════════════════════════════════════════")
+    parts.append("REGEL: source_id MÅSTE vara en av id:na ovan, eller \"ESTIMATED\" om du gissar.")
+    parts.append("═══════════════════════════════════════════════════════════════════\n")
+
+    return "\n".join(parts)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Adressanalys: är adressen innanför Stockholms tullar?
+# ═════════════════════════════════════════════════════════════════════
+def _is_inside_stockholm_tolls(address: str) -> bool:
+    """
+    Heuristik för att avgöra om en adress troligen är innanför Stockholms tullar.
+    Inte perfekt — för exakt geofencing behövs Mapbox/Google Geocoding.
+    """
+    if not address:
+        return False
+    addr = address.lower()
+    # Postnummer 100-119 är ungefär innerstaden
+    pnr_match = re.search(r'\b(1[0-1][0-9])\s*\d{2}\b', addr)
+    if pnr_match:
+        pnr_prefix = int(pnr_match.group(1))
+        if 100 <= pnr_prefix <= 119:
+            return True
+    # Kända innerstadsområden
+    inner_areas = [
+        "vasastan", "östermalm", "ostermalm", "södermalm", "sodermalm",
+        "kungsholmen", "norrmalm", "gamla stan", "djurgården", "djurgarden",
+        "stockholm city", "stockholms innerstad",
+    ]
+    return any(area in addr for area in inner_areas)
+
+
+def _is_inside_goteborg_tolls(address: str) -> bool:
+    """Heuristik för Göteborgs trängselskatte-zon."""
+    if not address:
+        return False
+    addr = address.lower()
+    pnr_match = re.search(r'\b(41[0-9])\s*\d{2}\b', addr)
+    if pnr_match:
+        pnr_prefix = int(pnr_match.group(1))
+        if 411 <= pnr_prefix <= 418:
+            return True
+    return False
+
+
+def _detect_region_from_address(address: str) -> str:
+    """Returnerar regionnyckel som matchar regional_multipliers-tabellen."""
+    if not address:
+        return "default"
+    addr = address.lower()
+    if any(k in addr for k in ["stockholm", "sollentuna", "solna", "danderyd", "lidingö", "huddinge", "nacka", "täby"]):
+        return "stockholm"
+    if "göteborg" in addr or "goteborg" in addr or "mölndal" in addr:
+        return "goteborg"
+    if "malmö" in addr or "malmo" in addr or "lund" in addr:
+        return "malmo"
+    if any(k in addr for k in ["umeå", "umea", "luleå", "lulea", "skellefteå", "östersund"]):
+        return "norrland"
+    return "default"
+
+
+# ═════════════════════════════════════════════════════════════════════
+# PDF-extrahering
+# ═════════════════════════════════════════════════════════════════════
 def _extract_pdf_text(b64_data: str) -> str:
-    """Extrahera text ur base64-kodad PDF med pypdf."""
     try:
         import pypdf  # type: ignore
         raw = b64_data.split(",")[-1]
@@ -204,14 +327,22 @@ def _extract_pdf_text(b64_data: str) -> str:
         return ""
 
 
+# ═════════════════════════════════════════════════════════════════════
+# Bygg user-text
+# ═════════════════════════════════════════════════════════════════════
 def _build_user_text(
     description: str,
     job_type: Optional[str],
-    area_sqm: Optional[float],
     location: Optional[str],
+    address: Optional[str],
+    distance_km: Optional[float],
+    work_days: Optional[int],
+    quality: str,
     hourly_rate: float,
     include_rot: bool,
     margin_pct: float,
+    ue_markup_pct: float,
+    inside_tolls: Optional[str],
     build_params: Optional[Dict[str, str]],
     documents: Optional[List],
 ) -> str:
@@ -220,52 +351,43 @@ def _build_user_text(
     parts.append(f"Jobbeskrivning: {description}")
     if job_type:
         parts.append(f"Jobbtyp: {job_type}")
-    if area_sqm is not None:
-        parts.append(f"Yta: {area_sqm} kvm")
+    parts.append(f"Kvalitetsnivå: {quality}")
     if location:
-        parts.append(f"Plats: {location}")
-    parts.append(f"Timpris: {hourly_rate or 650} kr/h")
-    parts.append(f"Påslag: {margin_pct or 15}%")
-    parts.append(f"ROT-avdrag: {'Ja (30% på arbete)' if include_rot else 'Nej'}")
+        parts.append(f"Plats (region): {location}")
+    if address:
+        parts.append(f"Adress: {address}")
+    if distance_km:
+        parts.append(f"Avstånd t/r: {distance_km} km enkel väg = {distance_km*2} km totalt per resedag")
+    if work_days:
+        parts.append(f"Uppskattat antal arbetsdagar: {work_days}")
+    if inside_tolls:
+        parts.append(f"VIKTIGT: Adressen är innanför {inside_tolls.upper()}S TULLAR — lägg till trängselskatt per arbetsdag")
+
+    parts.append(f"Timpris (eget arbete): {hourly_rate} kr/h")
+    parts.append(f"Påslag eget arbete + material: {margin_pct}%")
+    parts.append(f"Påslag underentreprenörer: {ue_markup_pct}%")
+    parts.append(f"ROT-avdrag: {'Ja (30% på arbete inkl. UE-arbetsandel)' if include_rot else 'Nej'}")
 
     if build_params:
         LABELS = {
-            "floor_sqm":      "Golvyta",
-            "ceiling_height": "Takhöjd",
-            "tiled_walls":    "Antal kaklade väggar",
-            "tile_height":    "Kakelhöjd på vägg",
-            "openings":       "Dörrar & fönster (st)",
-            "kitchen_width":  "Kökets bredd",
-            "base_cabinets":  "Antal basskåp",
-            "wall_cabinets":  "Antal hängskåp",
-            "countertop_len": "Bänkskivans längd",
-            "roof_area":      "Takarea",
-            "roof_pitch":     "Taklutning",
-            "roof_type":      "Takets form",
-            "perimeter":      "Husomkrets",
-            "facade_height":  "Fasadhöjd",
-            "windows":        "Antal fönster",
-            "doors":          "Antal dörrar",
-            "room_width":     "Rumsbredd",
-            "floor_type":     "Golvtyp",
-            "wall_sqm":       "Väggyta att måla",
-            "rooms":          "Antal rum",
-            "outlets":        "Antal uttag/brytare",
-            "cable_meters":   "Kabelledning",
-            "fixtures":       "Antal armaturer",
-            "taps":           "Antal blandare",
-            "pipe_meters":    "Ny rörledning",
-            "drains":         "Antal avlopp",
-            "addition_sqm":   "Tillbyggnadsarea",
-            "area_sqm":       "Yta/area",
-            "units":          "Antal enheter",
-            "ingår_i_jobbet": "Ingår i jobbet",
-            "jobbtyp":        "Jobbtyp (bekräftad)",
-            "location":       "Plats",
-            "build_year":     "Byggår",
-            "num_rooms":      "Antal rum",
-            "floors":         "Våningar",
-            "extra":          "Övrigt",
+            "room_dimensions":   "Rumsmått (B×L)",
+            "facade_area":       "Fasadarea",
+            "facade_height":     "Fasadhöjd",
+            "perimeter":         "Husomkrets",
+            "windows":           "Antal fönster",
+            "doors":             "Antal dörrar",
+            "floor_sqm":         "Golvyta",
+            "ceiling_height":    "Takhöjd",
+            "altan_dimensions":  "Altanmått (B×L)",
+            "altan_height":      "Höjd över mark",
+            "railing":           "Räcke (lpm)",
+            "stairs":            "Trappa (antal steg)",
+            "ground_type":       "Markförhållanden",
+            "rivning_scope":     "Vad som ska rivas",
+            "demolition_volume": "Uppskattad rivningsvolym (kbm)",
+            "build_year":        "Byggår",
+            "ingår_i_jobbet":    "Ingår i jobbet",
+            "extra":             "Övrigt",
         }
         lines = []
         for key, value in build_params.items():
@@ -281,46 +403,133 @@ def _build_user_text(
             data = doc.data if hasattr(doc, "data") else doc.get("data", "")
             extracted = _extract_pdf_text(data) if data else ""
             if extracted:
-                doc_blocks.append(
-                    f"--- PDF-UNDERLAG: {name} ---\n{extracted[:6000]}\n--- SLUT PDF ---"
-                )
+                doc_blocks.append(f"--- PDF-UNDERLAG: {name} ---\n{extracted[:6000]}\n--- SLUT PDF ---")
             else:
                 doc_blocks.append(f"[Bifogad fil: {name}]")
-        parts.append(
-            "\nBifogade underlag (läs och basera kalkylen på innehållet):\n"
-            + "\n\n".join(doc_blocks)
-        )
+        parts.append("\nBifogade underlag (läs och basera kalkylen på innehållet):\n" + "\n\n".join(doc_blocks))
 
     return "\n".join(parts)
 
 
-def _detect_house_age(build_params: Optional[Dict[str, str]]) -> str:
-    """Avgör husålder från build_params för att välja rätt norm."""
-    if not build_params:
-        return "all"
-    year_str = build_params.get("build_year", "")
-    if not year_str:
-        return "all"
-    try:
-        year = int(str(year_str).replace("ca", "").strip()[:4])
-        return "pre1975" if year < 1975 else "post1975"
-    except (ValueError, TypeError):
-        return "all"
+# ═════════════════════════════════════════════════════════════════════
+# Deterministisk omräkning + automatiska overhead-rader
+# ═════════════════════════════════════════════════════════════════════
+def _apply_overhead_rules(
+    data: dict,
+    pricing_ctx: dict,
+    distance_km: Optional[float],
+    work_days: Optional[int],
+    inside_tolls: Optional[str],
+    job_type: str,
+) -> None:
+    """
+    Lägger till overhead-rader (resor, trängselskatt, frakt) baserat på
+    overhead_costs-tabellens trigger_rule. Detta görs INTE av AI:n —
+    backend har sista ordet eftersom reglerna är deterministiska.
+    """
+    overhead_rows = []
+
+    # Räkna materialsumma för frakt-trigger
+    material_total = 0.0
+    for cat in data.get("categories", []):
+        for row in cat.get("rows", []):
+            if row.get("type") == "material":
+                qty   = float(row.get("quantity", 0) or 0)
+                price = float(row.get("unit_price", 0) or 0)
+                material_total += qty * price
+
+    for o in pricing_ctx.get("overhead_costs", []):
+        calc = o.get("calc_type")
+        rate = float(o.get("rate", 0))
+        trigger = o.get("trigger_rule") or ""
+
+        # Resor
+        if calc == "per_km_round_trip" and distance_km and work_days:
+            total = round(distance_km * 2 * rate * work_days)
+            overhead_rows.append({
+                "description": o["label"],
+                "note":   f"{distance_km}km × 2 × {rate}kr × {work_days} resedagar",
+                "unit":   "kr",
+                "quantity": 1,
+                "unit_price": total,
+                "total":      total,
+                "type":   "overhead",
+                "source_id":  o["id"],
+            })
+
+        # Trängselskatt
+        elif calc == "congestion_per_workday" and work_days:
+            if inside_tolls and trigger == f"inside_tolls={inside_tolls}":
+                total = round(rate * work_days)
+                overhead_rows.append({
+                    "description": o["label"],
+                    "note":   f"{rate}kr × {work_days} arbetsdagar innanför tullarna",
+                    "unit":   "kr",
+                    "quantity": 1,
+                    "unit_price": total,
+                    "total":      total,
+                    "type":   "overhead",
+                    "source_id":  o["id"],
+                })
+
+        # Etablering / avetablering / fasta poster
+        elif calc == "flat":
+            include = False
+            if not trigger:
+                include = True
+            elif trigger == "fasad OR material_total>15000":
+                include = (job_type == "fasad") or (material_total > 15000)
+            if include:
+                total = round(rate)
+                overhead_rows.append({
+                    "description": o["label"],
+                    "note":   o.get("notes") or "",
+                    "unit":   "post",
+                    "quantity": 1,
+                    "unit_price": total,
+                    "total":      total,
+                    "type":   "overhead",
+                    "source_id":  o["id"],
+                })
+
+    if overhead_rows:
+        # Lägg till som första kategori
+        existing_etablering = next(
+            (c for c in data.get("categories", []) if c.get("name") == "Etablering & resa"),
+            None
+        )
+        if existing_etablering:
+            # Slå ihop — lägg till ovanpå
+            existing_etablering["rows"] = overhead_rows + existing_etablering.get("rows", [])
+        else:
+            data.setdefault("categories", []).insert(0, {
+                "name": "Etablering & resa",
+                "rows": overhead_rows,
+                "subtotal": sum(r["total"] for r in overhead_rows),
+            })
 
 
-def recalculate_totals(data: dict, hourly_rate: float, margin_pct: float, include_rot: bool) -> dict:
+def recalculate_totals(
+    data: dict,
+    hourly_rate: float,
+    margin_pct: float,
+    include_rot: bool,
+    ue_markup_pct: float = 12.5,
+) -> dict:
     """
     Räknar alltid om totals deterministiskt från raderna.
-    Litar aldrig på att AI:n räknat rätt — detta är källan till sanning.
+    Litar aldrig på AI:ns aritmetik.
     """
-    material_total   = 0.0
-    labor_total      = 0.0
-    equipment_total  = 0.0
+    material_total      = 0.0
+    labor_total         = 0.0
+    equipment_total     = 0.0
+    subcontractor_total = 0.0
+    disposal_total      = 0.0
+    overhead_total      = 0.0
 
     for cat in data.get("categories", []):
         cat_subtotal = 0.0
         for row in cat.get("rows", []):
-            # Räkna om radsumman deterministiskt
             qty   = float(row.get("quantity", 0) or 0)
             price = float(row.get("unit_price", 0) or 0)
             total = round(qty * price)
@@ -328,83 +537,189 @@ def recalculate_totals(data: dict, hourly_rate: float, margin_pct: float, includ
             cat_subtotal += total
 
             t = row.get("type", "labor")
-            if t == "material":
-                material_total  += total
-            elif t == "equipment":
-                equipment_total += total
-            else:
-                labor_total += total
+            if   t == "material":      material_total      += total
+            elif t == "equipment":     equipment_total     += total
+            elif t == "subcontractor": subcontractor_total += total
+            elif t == "disposal":      disposal_total      += total
+            elif t == "overhead":      overhead_total      += total
+            else:                      labor_total         += total
 
         cat["subtotal"] = round(cat_subtotal)
 
-    margin_pct_val   = float(margin_pct or 15)
-    subtotal         = material_total + labor_total + equipment_total
-    margin_amount    = round(subtotal * margin_pct_val / 100)
-    total_ex_vat     = round(subtotal + margin_amount)
-    vat              = round(total_ex_vat * 0.25)
-    total_inc_vat    = round(total_ex_vat + vat)
-    rot_deduction    = round(labor_total * 0.30) if include_rot else 0
-    customer_pays    = round(total_inc_vat - rot_deduction)
+    margin_pct_val    = float(margin_pct or 15)
+    ue_markup_pct_val = float(ue_markup_pct or 12.5)
+
+    # Eget: arbete + material + utrustning + deponi + overhead får ordinarie påslag
+    own_subtotal  = material_total + labor_total + equipment_total + disposal_total + overhead_total
+    own_margin    = round(own_subtotal * margin_pct_val / 100)
+    ue_markup     = round(subcontractor_total * ue_markup_pct_val / 100)
+
+    subtotal_ex_vat = round(own_subtotal + own_margin + subcontractor_total + ue_markup)
+    vat             = round(subtotal_ex_vat * 0.25)
+    total_inc_vat   = round(subtotal_ex_vat + vat)
+
+    if include_rot:
+        ue_labor_part = subcontractor_total * UE_LABOR_SHARE
+        rot_base      = labor_total + ue_labor_part
+        rot_deduction = round(rot_base * 0.30)
+    else:
+        rot_deduction = 0
+
+    customer_pays = round(total_inc_vat - rot_deduction)
 
     data["totals"] = {
-        "material_total":   round(material_total),
-        "labor_total":      round(labor_total),
-        "equipment_total":  round(equipment_total),
-        "subtotal_ex_vat":  total_ex_vat,
-        "margin_amount":    margin_amount,
-        "total_ex_vat":     total_ex_vat,
-        "vat":              vat,
-        "total_inc_vat":    total_inc_vat,
-        "rot_deduction":    rot_deduction,
-        "customer_pays":    customer_pays,
+        "material_total":      round(material_total),
+        "labor_total":         round(labor_total),
+        "equipment_total":     round(equipment_total),
+        "subcontractor_total": round(subcontractor_total),
+        "disposal_total":      round(disposal_total),
+        "overhead_total":      round(overhead_total),
+        "own_margin":          own_margin,
+        "ue_markup":           ue_markup,
+        "margin_amount":       own_margin + ue_markup,  # bakåtkompatibilitet
+        "subtotal":            round(own_subtotal + subcontractor_total),
+        "subtotal_ex_vat":     subtotal_ex_vat,
+        "total_ex_vat":        subtotal_ex_vat,
+        "vat":                 vat,
+        "total_inc_vat":       total_inc_vat,
+        "rot_deduction":       rot_deduction,
+        "customer_pays":       customer_pays,
     }
     data["meta"] = {
         **data.get("meta", {}),
-        "hourly_rate": float(hourly_rate or 650),
-        "margin_pct":  margin_pct_val,
-        "rot_applied": include_rot,
+        "hourly_rate":   float(hourly_rate or 650),
+        "margin_pct":    margin_pct_val,
+        "ue_markup_pct": ue_markup_pct_val,
+        "rot_applied":   include_rot,
     }
     return data
 
 
+# ═════════════════════════════════════════════════════════════════════
+# Spårbarhet: bygg en debug-snapshot per offert
+# ═════════════════════════════════════════════════════════════════════
+def _build_pricing_snapshot(data: dict, pricing_ctx: dict) -> dict:
+    """
+    För varje rad i offerten — koppla source_id till motsvarande databasrad
+    och returnera en snapshot. Detta sparas tillsammans med offerten så ni
+    kan i efterhand se exakt vilka databasrader som användes.
+    """
+    # Bygg id → källrad-mapping
+    id_to_source = {}
+    for n in pricing_ctx.get("work_norms", []):
+        id_to_source[str(n["id"])] = {"table": "work_norms", **n}
+    for m in pricing_ctx.get("material_prices", []):
+        id_to_source[str(m["id"])] = {"table": "material_prices", **m}
+    for s in pricing_ctx.get("subcontractor_prices", []):
+        id_to_source[str(s["id"])] = {"table": "subcontractor_prices", **s}
+    for d in pricing_ctx.get("disposal_costs", []):
+        id_to_source[str(d["id"])] = {"table": "disposal_costs", **d}
+    for e in pricing_ctx.get("equipment_rental", []):
+        id_to_source[str(e["id"])] = {"table": "equipment_rental", **e}
+    for o in pricing_ctx.get("overhead_costs", []):
+        id_to_source[str(o["id"])] = {"table": "overhead_costs", **o}
+
+    snapshot_rows = []
+    estimated_count = 0
+    matched_count   = 0
+
+    for cat in data.get("categories", []):
+        for row in cat.get("rows", []):
+            sid = row.get("source_id", "")
+            if sid == "ESTIMATED" or not sid:
+                estimated_count += 1
+                snapshot_rows.append({
+                    "row_description": row.get("description"),
+                    "row_total":  row.get("total"),
+                    "source_id":  sid or "MISSING",
+                    "source":     None,
+                    "category":   cat.get("name"),
+                })
+            elif sid in id_to_source:
+                matched_count += 1
+                snapshot_rows.append({
+                    "row_description": row.get("description"),
+                    "row_total":  row.get("total"),
+                    "source_id":  sid,
+                    "source":     id_to_source[sid],
+                    "category":   cat.get("name"),
+                })
+
+    return {
+        "rows":            snapshot_rows,
+        "matched_count":   matched_count,
+        "estimated_count": estimated_count,
+        "match_pct":       round(100 * matched_count / max(1, matched_count + estimated_count)),
+    }
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Huvudfunktion
+# ═════════════════════════════════════════════════════════════════════
 async def generate_estimate(
     description: str,
     job_type: Optional[str] = None,
-    area_sqm: Optional[float] = None,
+    area_sqm: Optional[float] = None,           # Bakåtkompatibilitet
     location: Optional[str] = None,
+    address: Optional[str] = None,
+    distance_km: Optional[float] = None,
+    work_days: Optional[int] = None,
+    quality: str = "standard",
     hourly_rate: float = 650,
     include_rot: bool = True,
     margin_pct: float = 15,
+    ue_markup_pct: float = 12.5,
     build_params: Optional[Dict[str, str]] = None,
     images: Optional[List] = None,
     documents: Optional[List] = None,
-    company_id: Optional[str] = None,  # mottages men används ej i AI-anropet ännu
-    **kwargs,  # framtidssäkert — ignorerar okända argument
+    company_id: Optional[str] = None,
+    **kwargs,
 ) -> dict:
 
-    # Hämta normer från Supabase
-    house_age = _detect_house_age(build_params)
-    norms_text = await fetch_norms(job_type or "badrum", house_age)
+    # ── 1. Härled region från adress eller location ──
+    if address:
+        region = _detect_region_from_address(address)
+    else:
+        region = _detect_region_from_address(location or "") or "default"
 
-    # Bygg system-prompt med normer injicerade
-    system = SYSTEM_PROMPT
-    if norms_text:
-        system += f"\n\n{norms_text}"
+    # ── 2. Avgör innanför tullar ──
+    inside_tolls: Optional[str] = None
+    if address:
+        if _is_inside_stockholm_tolls(address):
+            inside_tolls = "stockholm"
+        elif _is_inside_goteborg_tolls(address):
+            inside_tolls = "goteborg"
 
+    # ── 3. Hämta prislådan ──
+    pricing_ctx = await fetch_pricing_context(
+        job_type=job_type or "ovrigt",
+        company_id=company_id,
+        quality=quality,
+        region=region,
+    )
+
+    # ── 4. Bygg system-prompt med prislåda ──
+    system = SYSTEM_PROMPT_BASE + _format_pricing_for_prompt(pricing_ctx)
+
+    # ── 5. Bygg user-text ──
     user_text = _build_user_text(
         description=description,
         job_type=job_type,
-        area_sqm=area_sqm,
         location=location,
+        address=address,
+        distance_km=distance_km,
+        work_days=work_days,
+        quality=quality,
         hourly_rate=hourly_rate or 650,
         include_rot=include_rot,
         margin_pct=margin_pct or 15,
+        ue_markup_pct=ue_markup_pct or 12.5,
+        inside_tolls=inside_tolls,
         build_params=build_params,
         documents=documents,
     )
 
     messages = [{"role": "system", "content": system}]
-
     all_images = list(images or [])
 
     if all_images:
@@ -413,45 +728,59 @@ async def generate_estimate(
             data = img.data if hasattr(img, "data") else img.get("data", "")
             name = img.name if hasattr(img, "name") else img.get("name", "")
             if data:
-                # Frontend prefixar ritningar med "[RITNING]" — använd high detail
-                # Projektfoton — low detail räcker
                 is_drawing = name.startswith("[RITNING]")
                 detail = "high" if is_drawing else "low"
                 content_parts.append({
-                    "type": "image_url",
+                    "type":      "image_url",
                     "image_url": {"url": data, "detail": detail},
                 })
         names = [
             (img.name if hasattr(img, "name") else img.get("name", "bild"))
             for img in all_images[:8]
         ]
-        content_parts[0]["text"] += (
-            f"\n\nBifogade bilder ({len(names)} st): {', '.join(names)}"
-        )
+        content_parts[0]["text"] += f"\n\nBifogade bilder ({len(names)} st): {', '.join(names)}"
         messages.append({"role": "user", "content": content_parts})
     else:
         messages.append({"role": "user", "content": user_text})
 
+    # ── 6. Anropa OpenAI ──
     try:
         response = await client.chat.completions.create(
             model="gpt-4o",
             messages=messages,
-            temperature=0.3,
-            max_tokens=4000,
+            temperature=0.2,            # lägre temp eftersom vi vill ha exakta priser
+            max_tokens=4500,
             response_format={"type": "json_object"},
         )
-
-        raw = response.choices[0].message.content or "{}"
+        raw  = response.choices[0].message.content or "{}"
         data = json.loads(raw)
 
-        # Räkna alltid om totals deterministiskt från raderna
-        # — litar aldrig på AI:ns egna summor
+        # ── 7. Backend lägger till deterministiska overhead-rader ──
+        _apply_overhead_rules(data, pricing_ctx, distance_km, work_days, inside_tolls, job_type or "ovrigt")
+
+        # ── 8. Räkna om totals ──
         data = recalculate_totals(
             data,
             hourly_rate=hourly_rate or 650,
             margin_pct=margin_pct or 15,
             include_rot=include_rot,
+            ue_markup_pct=ue_markup_pct or 12.5,
         )
+
+        # ── 9. Bygg pricing snapshot för spårbarhet ──
+        data["pricing_snapshot"] = _build_pricing_snapshot(data, pricing_ctx)
+
+        # ── 10. Lägg metadata om jobbet ──
+        data["meta"] = {
+            **data.get("meta", {}),
+            "region":       region,
+            "address":      address,
+            "inside_tolls": inside_tolls,
+            "distance_km":  distance_km,
+            "work_days":    work_days,
+            "quality":      quality,
+        }
+
         return data
 
     except json.JSONDecodeError as e:
@@ -460,6 +789,9 @@ async def generate_estimate(
         raise ValueError(f"OpenAI-anrop misslyckades: {e}")
 
 
+# ═════════════════════════════════════════════════════════════════════
+# Chat (oförändrad)
+# ═════════════════════════════════════════════════════════════════════
 async def chat_about_estimate(message: str, context: Optional[dict] = None) -> str:
     system = "Du är en hjälpsam svensk byggkalkylator-assistent. Svara kort och konkret på svenska."
     msgs = [{"role": "system", "content": system}]
@@ -475,3 +807,18 @@ async def chat_about_estimate(message: str, context: Optional[dict] = None) -> s
         max_tokens=1000,
     )
     return response.choices[0].message.content or "Jag kunde inte svara."
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Bakåtkompatibilitet med tidigare kod
+# ═════════════════════════════════════════════════════════════════════
+async def fetch_norms(job_type: str, house_age: str = "all") -> str:
+    """Behålls för /api/norms-endpointen — ger en text-version av work_norms."""
+    ctx = await fetch_pricing_context(job_type=job_type, quality="standard", region="default")
+    norms = ctx.get("work_norms", [])
+    if not norms:
+        return ""
+    lines = [f"\nARBETSTIDSNORMER FÖR {job_type.upper()}:"]
+    for n in norms:
+        lines.append(f"  {n['label']}: {n['hours_per']} timmar per {n['unit']}")
+    return "\n".join(lines)
