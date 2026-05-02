@@ -318,3 +318,84 @@ def job_types():
         {"id": "tillbyggnad", "label": "Tillbyggnad",  "icon": "📐", "enabled": False},
         {"id": "ovrigt",      "label": "Övrigt",       "icon": "🔨", "enabled": True},
     ]
+
+class OutcomeRequest(BaseModel):
+    quote_id: str
+    outcome: str                          # 'won' | 'lost' | 'pending'
+    actual_final_price: Optional[float] = None
+    lost_reason: Optional[str] = None
+
+
+@app.post("/api/quotes/{quote_id}/outcome")
+async def update_quote_outcome(
+    quote_id: str,
+    req: OutcomeRequest,
+    request: Request,
+):
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        raise HTTPException(status_code=500, detail="Supabase inte konfigurerat")
+    if req.outcome not in {"won", "lost", "pending"}:
+        raise HTTPException(status_code=400, detail="Ogiltigt outcome-värde")
+
+    user_id = get_user_id(request)
+
+    update_data: dict = {"outcome": req.outcome}
+
+    if req.actual_final_price is not None:
+        update_data["actual_final_price"] = req.actual_final_price
+
+    if req.outcome == "lost" and req.lost_reason:
+        update_data["lost_reason"] = req.lost_reason
+
+    if req.outcome == "won" and req.actual_final_price:
+        # Beräkna och logga avvikelsen i feedback_events automatiskt
+        headers = {
+            "apikey":        SUPABASE_SERVICE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+            "Content-Type":  "application/json",
+        }
+        async with httpx.AsyncClient(timeout=10.0) as http:
+            # Hämta offerten för att få ai-priset
+            r = await http.get(
+                f"{SUPABASE_URL}/rest/v1/quotes",
+                params={"id": f"eq.{quote_id}", "select": "total_inc_vat,project_type,region,quote_number"},
+                headers=headers,
+            )
+            if r.status_code == 200 and r.json():
+                q = r.json()[0]
+                ai_price = q.get("total_inc_vat", 0)
+                diff_pct = round(
+                    abs(req.actual_final_price - ai_price) / max(ai_price, 1) * 100, 1
+                )
+                # Spara som feedback_event så avvikelsen syns i kalibrerings-queryn
+                await http.post(
+                    f"{SUPABASE_URL}/rest/v1/feedback_events",
+                    headers={**headers, "Prefer": "return=minimal"},
+                    json={
+                        "quote_number":  q.get("quote_number", quote_id),
+                        "field_changed": "total_final_price",
+                        "ai_value":      str(round(ai_price)),
+                        "final_value":   str(round(req.actual_final_price)),
+                        "reason_code":   "market_price" if diff_pct > 10 else "other",
+                        "reason_text":   f"Faktiskt slutpris: {req.actual_final_price} kr (avvikelse {diff_pct}%)",
+                        "job_type":      q.get("project_type", ""),
+                        "region":        q.get("region", ""),
+                    },
+                )
+
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        r = await http.patch(
+            f"{SUPABASE_URL}/rest/v1/quotes",
+            params={"id": f"eq.{quote_id}"},
+            headers={
+                "apikey":        SUPABASE_SERVICE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                "Content-Type":  "application/json",
+                "Prefer":        "return=minimal",
+            },
+            json=update_data,
+        )
+        if r.status_code >= 400:
+            raise HTTPException(status_code=500, detail=f"Kunde inte uppdatera offert: {r.text}")
+
+    return {"success": True, "outcome": req.outcome}
