@@ -848,21 +848,18 @@ def _apply_overhead_rules(
                     "source_id":  o["id"],
                 })
 
-    if overhead_rows:
-        # Lägg till som första kategori
-        existing_etablering = next(
-            (c for c in data.get("categories", []) if c.get("name") == "Etablering & resa"),
-            None
-        )
-        if existing_etablering:
-            # Slå ihop — lägg till ovanpå
-            existing_etablering["rows"] = overhead_rows + existing_etablering.get("rows", [])
-        else:
-            data.setdefault("categories", []).insert(0, {
-                "name": "Etablering & resa",
-                "rows": overhead_rows,
-                "subtotal": sum(r["total"] for r in overhead_rows),
-            })
+     if overhead_rows:
+        # Ta bort AI:ns etableringsrader helt — backend har alltid sista ordet
+        data["categories"] = [
+            c for c in data.get("categories", [])
+            if c.get("name") != "Etablering & resa"
+        ]
+        # Lägg in backends deterministiska version som första kategori
+        data.setdefault("categories", []).insert(0, {
+            "name": "Etablering & resa",
+            "rows": overhead_rows,
+            "subtotal": sum(r["total"] for r in overhead_rows),
+        })
 
 
 def _apply_work_norms_pricing(
