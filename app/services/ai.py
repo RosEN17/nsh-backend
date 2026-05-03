@@ -393,11 +393,13 @@ För material_prices, disposal_costs, equipment_rental: dessa ÄR i kronor.
     - Höjd under 0,8 m → "Regel 45x95 tryckimpregnerat" × lpm
     - Höjd 0,8–1,2 m  → "Bjälke 45x145 impregnerad" × lpm
     - Höjd över 1,2 m → "Bjälke 45x195 impregnerad" × lpm
+    - Höjd exakt 0,5 m eller lägre → "Regel 45x95 tryckimpregnerat" ALLTID.
+    Det är ett vanligt misstag att välja bjälke vid 0,5 m — GÖR INTE DET.
     Det är ALDRIG korrekt att använda 45x195 på en altan under 0,8 m.
     Räkna lpm reglar: (altanlängd / 0,6) × altanbredd + 2 × altanomkrets (kantreglar).
     Norm: "Montering reglar/bärande stomme" × kvm altanarea.
     Lägg under "Stomme & konstruktion".
-
+    
 [5] Altangolv — KRÄVS alltid. Välj material baserat på quality:
     - Standard: "Trall 28×120 furu impregnerad" ELLER "Trall 28×145 furu impregnerad"
     - Premium: "Trall 28×145 komposit Trex" ELLER "Trall ek hyvlad 28×120" (lärk)
