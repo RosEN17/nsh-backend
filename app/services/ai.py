@@ -40,12 +40,11 @@ client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 
-# Andel av UE-pris som räknas som arbete (resten är material/marginal hos UE)
 UE_LABOR_SHARE = 0.60
 
 
 # ═════════════════════════════════════════════════════════════════════
-# SYSTEM-PROMPT — nu med tydliga regler om prislådan
+# SYSTEM-PROMPT
 # ═════════════════════════════════════════════════════════════════════
 SYSTEM_PROMPT_BASE = """Du är en erfaren svensk byggkalkylator-AI. Du genererar detaljerade kostnadskalkyler för hantverksjobb i Sverige.
 
@@ -66,7 +65,6 @@ För varje rad du skapar:
 
 Om du inte hittar matchande post i prislådan: lägg raden ändå med
 source_id="ESTIMATED" och en tydlig note som förklarar varför du gissade.
-Detta är en signal till oss att lägga in den posten i databasen.
 
 ═══ RADTYPER ═══
 - type="labor"         → eget arbete (debiteras hourly_rate)
@@ -78,7 +76,7 @@ Detta är en signal till oss att lägga in den posten i databasen.
 
 ═══ KATEGORISTRUKTUR ═══
 Använd dessa kategorinamn när relevant:
-- "Etablering & resa"
+- "Etablering & resa"  ← HOPPA ÖVER DENNA — backend lägger in den automatiskt
 - "Rivning" (om något ska rivas)
 - "Förberedelse"
 - "Stomme & konstruktion"
@@ -112,11 +110,11 @@ Hoppa ALDRIG över ett moment som står där.
   "estimated_days": 5,
   "categories": [
     {
-      "name": "Etablering & resa",
+      "name": "Förberedelse",
       "rows": [
-        {"description": "Etablering arbetsplats", "note": "Uppställning första dagen", "unit": "post", "quantity": 1, "unit_price": 2500, "total": 2500, "type": "overhead", "source_id": "uuid-från-prislåda"}
+        {"description": "Markförberedelse", "note": "Utsättning", "unit": "kvm", "quantity": 24, "unit_price": 0, "total": 0, "type": "labor", "source_id": "uuid-från-prislåda"}
       ],
-      "subtotal": 2500
+      "subtotal": 0
     }
   ],
   "totals": {},
@@ -125,29 +123,21 @@ Hoppa ALDRIG över ett moment som står där.
   "assumptions": []
 }
 
-OBS: "totals" och "meta" lämnas tomma — backend räknar deterministiskt."""
+OBS: "totals" och "meta" lämnas tomma — backend räknar deterministiskt.
+OBS: Skapa ALDRIG kategorin "Etablering & resa" — backend lägger in den automatiskt."""
 
-
-# ═════════════════════════════════════════════════════════════════════
-# JOBBTYPSSPECIFIK CHECKLISTA — RIVNING
-# ═════════════════════════════════════════════════════════════════════
-# Detta block injekteras till SYSTEM_PROMPT_BASE endast när
-# job_type == "rivning". Lägg till motsvarande checklistor för "fasad"
-# och "altan" när respektive prislåda är auditerad.
 RIVNING_CHECKLIST = """
 
 ═══ OBLIGATORISK CHECKLISTA FÖR RIVNING ═══
 Detta block gäller för detta jobb (job_type=rivning).
 
-Innan du returnerar JSON-svaret: gå igenom listan nedan. För VARJE punkt
-måste du antingen (a) lägga till motsvarande rad(er) i offerten, eller
-(b) skriva i "assumptions"-arrayen varför punkten inte gäller för
-detta specifika jobb.
-
+Gå igenom listan nedan. För VARJE punkt måste du antingen
+(a) lägga till motsvarande rad(er) i offerten, eller
+(b) skriva i "assumptions"-arrayen varför punkten inte gäller.
 DET ÄR INTE TILLÅTET ATT TYST HOPPA ÖVER EN PUNKT.
 
-═══ VIKTIGT OM ENHETER OCH PRISER I work_norms ═══
-work_norms-rader anger TIMMAR per enhet (hours_per), INTE kronor.
+═══ VIKTIGT OM work_norms ═══
+work_norms anger TIMMAR per enhet (hours_per), INTE kronor.
 För dessa rader ska du:
   - Sätt source_id = norm-radens id
   - Sätt quantity = antal enheter (vån, m², st, post osv.)
@@ -161,15 +151,14 @@ använd dess id som source_id. Hittar du INGEN matchande post:
 lägg raden ändå med source_id="ESTIMATED" och din bästa uppskattning.
 Det är BÄTTRE att gissa och flagga ESTIMATED än att utelämna posten.
 
-[1] Etablering & avetablering — backend lägger in detta automatiskt
-    från overhead_costs. Skapa INGEN egen rad för dessa.
-    Även om du ser etableringsposter i prislådan: HOPPA ÖVER DEM.
+[1] Etablering & avetablering — backend lägger in automatiskt.
+    Skapa INGEN egen rad. Skapa INTE kategorin "Etablering & resa".
 
 [2] Förbrukningsmaterial (sågblad, slipskivor, skyddsutrustning,
     säckar, tejp). Räkna ~350 kr per arbetare per dag.
-    Lägg som type="material" i kategori "Förberedelse" eller
-    "Ytskikt & material". Sök i prislådan efter "Förbrukningspaket
-    rivning per dag" — finns den, använd den. Annars ESTIMATED.
+    Lägg som type="material" i kategori "Förberedelse".
+    Sök i prislådan efter "Förbrukningspaket rivning per dag" — finns den,
+    använd den. Annars ESTIMATED.
 
 [3] Skyddstäckning trapphus — KRÄVS alltid när rivning sker i
     flerbostadshus, BRF, hyreshus, eller när description nämner
@@ -182,311 +171,229 @@ Det är BÄTTRE att gissa och flagga ESTIMATED än att utelämna posten.
     något av: "utan hiss", "X tr", "X vån", "trappa", "ej hiss".
     Använd norm "Bär-tillägg per m³ avfall per våning utan hiss".
     Sätt quantity = demolition_volume × antal våningar.
-    Exempel: 12 m³ × 4 vån = 48 enheter (backend multiplicerar
-    sedan med hours_per och hourly_rate).
+    Exempel: 12 m³ × 4 vån = 48 enheter.
+    Om underlaget INTE specificerar våningsantal men säger "utan hiss":
+    anta minst 2 våningar och flagga i "assumptions".
 
-[5] Container för avfall — minst 1 st. Vid demolition_volume > 10 m³
-    behövs antingen 2 vändor av 10 m³, eller en 15 m³.
+[5] Container för avfall — minst 1 st.
+    Vid demolition_volume > 10 m³: välj 15 m³ eller 2 vändor av 10 m³.
+    Sök i disposal_costs efter rätt containerstorlek.
 
-[6] Deponi-kostnad i ton. Konvertera från demolition_volume med
-    densitetsfaktor:
-    - Kakel/klinker/betong/bruk: 1,8–2,0 ton/m³ → "Deponi tungt rivningsavfall"
-    - Blandat (kök+inredning): 1,1–1,3 ton/m³ → "Deponi blandat rivningsavfall"
-    - Mest gips/trä: 0,3–0,5 ton/m³ → "Deponi blandat rivningsavfall"
-    Det får ALDRIG saknas en deponi-rad på ett rivningsjobb.
+[6] Deponi-kostnad i ton — KRÄVS ALLTID. Det får ALDRIG saknas
+    en deponi-rad på ett rivningsjobb.
+    Konvertera från demolition_volume med densitetsfaktor:
+    - Kakel/klinker/betong/bruk: 1,8–2,0 ton/m³ → tungt rivningsavfall
+    - Blandat (kök+inredning): 1,1–1,3 ton/m³ → blandat rivningsavfall
+    - Mest gips/trä: 0,3–0,5 ton/m³ → blandat rivningsavfall
 
-[7] Hyrutrustning — minst följande på alla rivningsjobb:
-    - Mejselhammare/bilningshammare (om kakel/klinker/betong rivs)
-    - Industridammsugare M-klass (alltid)
-    - Luftrenare HEPA (om dammsanering nämns ELLER flerbostadshus
-      ELLER BRF nämns i underlaget)
+[7] Hyrutrustning — lägg med minst följande:
+    - Mejselhammare/bilningshammare: om kakel/klinker/betong rivs
+    - Industridammsugare M-klass: ALLTID
+    - Luftrenare HEPA: om dammsanering nämns ELLER flerbostadshus/BRF
+    - Slipmaskin: om golvsliping ingår
+    Sök i equipment_rental efter varje post.
 
-[8] Demontering vitvaror varsamt — separat rad om vitvaror nämns
-    specifikt (kunden behåller, säljer, skänker bort, "demonteras
-    varsamt"). Använd norm "Demontering vitvaror varsamt per styck".
-    Om vitvaror endast ska rivas/slängas: räkna som del av
-    "Rivning köksinredning komplett".
+[8] Demontering vitvaror varsamt — separat rad ENDAST om vitvaror nämns
+    specifikt och kunden behåller/säljer/skänker bort dem.
+    Använd norm "Demontering vitvaror varsamt per styck" × antal.
+    Om vitvaror ska slängas: räkna dem som del av rivningskostnaden.
 
 [9] Slutrengöring efter rivning — KRÄVS på alla rivningsjobb.
     Använd norm "Slutrengöring efter rivning per m²" × rivningsyta.
+    Lägg under "Efterarbete".
 
-[10] Resor och trängselskatt — backend räknar AUTOMATISKT från
-     distance_km, work_days och adress (overhead_costs med
-     calc_type=per_km_round_trip och congestion_per_workday).
+[10] Plastning och skydd av kvarvarande ytor — KRÄVS om delar av
+     lokalen/lägenheten inte rivs och måste skyddas.
+     Norm "Plastning skydd ytor och inventarier" × kvm skyddsyta.
+     Lägg under "Förberedelse".
+
+[11] Resor och trängselskatt — backend räknar AUTOMATISKT från
+     distance_km, work_days och adress.
      Skapa INGEN egen rad för resor eller trängselskatt.
 
 EXEMPEL PÅ "assumptions"-text när en punkt skippas:
 - "Punkt 4 (bär-tillägg) skippad: hiss finns enligt underlag"
 - "Punkt 8 (demontering vitvaror) skippad: kunden vill att vi slänger allt"
-- "Punkt 3 (skyddstäckning) skippad: rivning sker i fristående hus"
-
-OBS: Om underlaget INTE specificerar våningsantal men säger "utan hiss"
-ska du anta minst 2 våningar och flagga antagandet i "assumptions"."""
-
+- "Punkt 3 (skyddstäckning) skippad: rivning sker i fristående villa"
+- "Punkt 7 (luftrenare HEPA) skippad: fristående hus, ej BRF" """
 # ═════════════════════════════════════════════════════════════════════
-# JOBBTYPSSPECIFIK CHECKLISTA — FASAD
+# CHECKLISTA — FASAD
 # ═════════════════════════════════════════════════════════════════════
 FASAD_CHECKLIST = """
 
 ═══ OBLIGATORISK CHECKLISTA FÖR FASAD ═══
 Detta block gäller för detta jobb (job_type=fasad).
 
-Innan du returnerar JSON-svaret: gå igenom listan nedan. För VARJE punkt
-måste du antingen (a) lägga till motsvarande rad(er) i offerten, eller
-(b) skriva i "assumptions"-arrayen varför punkten inte gäller för
-detta specifika jobb.
-
+Gå igenom listan nedan. För VARJE punkt måste du antingen
+(a) lägga till motsvarande rad(er) i offerten, eller
+(b) skriva i "assumptions"-arrayen varför punkten inte gäller.
 DET ÄR INTE TILLÅTET ATT TYST HOPPA ÖVER EN PUNKT.
 
-═══ VIKTIGT OM ENHETER OCH PRISER I work_norms ═══
-work_norms-rader anger TIMMAR per enhet (hours_per), INTE kronor.
-För dessa rader ska du:
-  - Sätt source_id = norm-radens id
-  - Sätt quantity = antal enheter (kvm, lpm, st, post osv.)
-  - Sätt unit_price = 0 och total = 0
-  - Backend räknar AUTOMATISKT om unit_price = hours_per × hourly_rate
-För material_prices, disposal_costs, equipment_rental: dessa ÄR i kronor.
-  - Använd unit_price = postens price-värde direkt.
+═══ VIKTIGT OM work_norms ═══
+work_norms anger TIMMAR per enhet, INTE kronor.
+  - unit_price = 0, total = 0 (backend räknar om automatiskt)
+material_prices, disposal_costs, equipment_rental ÄR i kronor.
+  - unit_price = postens price-värde direkt
 
-[1] Etablering & avetablering — backend lägger in detta automatiskt.
-    Skapa INGEN egen rad för etablering eller avetablering.
-    Även om du ser etableringsposter i prislådan: HOPPA ÖVER DEM.
+[1] Etablering & avetablering — backend lägger in automatiskt.
+    Skapa INGEN egen rad. Skapa INTE kategorin "Etablering & resa".
 
-[2] Ställning — KRÄVS alltid på fasadjobb om inte beskrivningen
-    explicit säger "utan ställning" eller "markplan".
-    Räkna ställningsarea = fasadhöjd × husomkrets (eller fasad_area om angiven).
-    Använd rätt post från equipment_rental:
-    - Fasadhöjd ≤ 8 m → "Ställning fasad <8m, första månaden" + ev. "per kvm/månad" om jobbet tar >1 månad
-    - Fasadhöjd > 8 m → "Ställning >8m med bygghiss"
-    Glöm inte "Avetablering ställning" som separat rad om den finns i prislådan.
-    Lägg dessa under kategori "Hyrutrustning".
+[2] Ställning — KRÄVS alltid om inte "utan ställning" eller "markplan".
+    - Höjd ≤ 8 m: "Ställning fasad <8m, första månaden" (kvm)
+    - Höjd > 8 m: "Ställning >8m med bygghiss" (kvm)
+    Lägg under "Hyrutrustning".
 
-[3] Demontering hängrännor och stuprör — KRÄVS om hängrännor/stuprör
-    nämns ELLER om det är en komplett fasadrenovering. Använd norm
-    "Demontering hängrännor och stuprör" × lpm husomkrets.
-    Lägg under "Förberedelse".
+[3] Demontering hängrännor — KRÄVS vid komplett fasadrenovering.
+    Norm × lpm husomkrets. Lägg under "Förberedelse".
 
-[4] Vindskydd — KRÄVS på alla fasadjobb med regelfasad eller ny panel.
-    Använd post "Vindskyddspapp standard" eller "Vindskyddspapp Tyvek"
-    (premium om quality=premium). Räkna kvm = fasad_area.
-    Lägg under "Ytskikt & material".
+[4] Vindskydd — KRÄVS vid ny panel/regelfasad.
+    "Vindskyddspapp standard" eller Tyvek (premium). kvm = fasad_area.
 
-[5] Läkt — KRÄVS när ny panel monteras ovanpå befintlig eller ny regel.
-    Använd "Läkt 22×45 impregnerad" × lpm (räkna c/c 600 mm:
-    lpm läkt ≈ fasad_area / 0,6).
-    Lägg under "Ytskikt & material".
+[5] Läkt — KRÄVS vid ny panel.
+    "Läkt 22×45 impregnerad" × lpm. lpm ≈ fasad_area / 0,6.
 
-[6] Panel/fasadmaterial — specificera rätt:
-    - Stående panel: "Träpanel 22×120 fingerskarvad gran" eller "Träpanel 22×145 lärk" (premium)
-    - Liggande panel: "Knutbrädor 45×95" + "Träpanel 22×120 fingerskarvad gran"
-    - Ange kvm med 15% spill (quantity = fasad_area × 1,15).
-    Lägg under "Ytskikt & material".
+[6] Panel — specificera rätt typ med 15% spill (quantity = fasad_area × 1,15).
+    - Stående: "Träpanel 22×120 fingerskarvad gran" eller lärk (premium)
+    - Liggande: "Knutbrädor 45×95" + träpanel
 
-[7] Ytbehandling — KRÄVS om ytbehandling nämns ELLER om det är ny panel.
-    - Grundning: 1 strykning
-    - Täckfärg: normalt 2 strykningar (Falu Rödfärg = 1 strykning)
-    Räkna kvm = fasad_area. Använd norm per strykning.
-    Om kunden valt Fasadfärg/silikatfärg (ej Falu): använd premium-post.
-    Lägg under "Ytskikt & material".
+[7] Ytbehandling — KRÄVS om ytbehandling nämns eller ny panel.
+    - Grundning: 1 strykning × kvm
+    - Täckfärg: 2 strykningar × kvm (Falu Rödfärg = 1 strykning)
 
-[8] Fönster- och dörranpassningar — KRÄVS om fönster/dörrar finns.
-    Antal fönster och dörrar ska räknas explicit:
+[8] Fönster/dörranpassningar — KRÄVS om fönster/dörrar finns.
     - "Anpassning runt dörrkarmar" × antal dörrar
-    - "Foder fönster 22×70" × (antal fönster × omkrets per fönster ≈ 5 lpm)
-    - "Knutbrädor 45×95" om liggande panel används
-    Lägg under "Ytskikt & material".
+    - "Foder fönster 22×70" × (antal fönster × 5 lpm)
 
-[9] Hängrännor och stuprör — KRÄVS om gamla demonterades (punkt 3)
-    eller om kunden vill ha nya. Ange:
-    - "Hängrännor stål 5m" × antal lpm husomkrets / 5
-    - "Stuprör stål 3m" × antal (1 per hörn, minst 2)
-    Lägg under "Ytskikt & material".
+[9] Hängrännor/stuprör — KRÄVS om gamla demonterades eller kunden vill ha nya.
+    - "Hängrännor stål 5m" × lpm / 5
+    - "Stuprör stål 3m" × antal hörn (minst 2)
 
-[10] Skruvförbrukning och småvaror — KRÄVS alltid.
-     Använd post "Skruv förbrukning + småvaror" som fast post.
-     Lägg under "Ytskikt & material".
+[10] Skruvförbrukning + småvaror — KRÄVS alltid. Fast post.
 
 [11] Förbrukningsmaterial per dag — KRÄVS alltid.
-     Penslar, rollers, skyddsutrustning, maskeringstejp etc.
-     Räkna ~350 kr per arbetare per dag.
-     Sök efter "Förbrukningspaket fasad per dag" i prislådan.
-     Lägg under "Förberedelse".
+     Penslar, rollers, tejp. Sök "Förbrukningspaket fasad per dag".
 
-[12] Frakt material — KRÄVS om material_total > 15 000 kr.
-     Backend lägger in detta automatiskt från overhead_costs om
-     trigger_rule = "fasad OR material_total>15000" matchar.
-     Skapa INGEN egen rad för frakt.
+[12] Frakt — backend lägger in automatiskt. Skapa INGEN rad.
 
-[13] Slutbesiktning med kund — KRÄVS alltid.
-     Använd norm "Slutbesiktning med kund" × 1 post.
-     Lägg under "Efterarbete".
+[13] Slutbesiktning med kund — KRÄVS alltid. Norm × 1 post.
 
-[14] Plastning och skydd ytor och inventarier — KRÄVS om målning ingår.
-     Använd norm "Plastning skydd ytor och inventarier" × kvm fasadarea.
-     Lägg under "Förberedelse".
+[14] Plastning skydd ytor — KRÄVS om målning ingår. Norm × kvm fasadarea.
 
-[15] Resor och trängselskatt — backend räknar AUTOMATISKT.
-     Skapa INGEN egen rad för resor eller trängselskatt.
+[15] Resor/trängselskatt — backend räknar automatiskt. Skapa INGEN rad.
 
-EXEMPEL PÅ "assumptions"-text när en punkt skippas:
-- "Punkt 2 (ställning) skippad: markplan, stege räcker"
-- "Punkt 3 (hängrännor demontering) skippad: befintliga hängrännor behålls"
-- "Punkt 9 (nya hängrännor) skippad: kunden beställer separat"
-- "Punkt 7 (ytbehandling) skippad: råspont levereras färdigbehandlad"
-
-AREALBERÄKNING — SÅ HÄR RÄKNAR DU:
-Om facade_area är angiven: använd den direkt.
-Om INTE angiven men perimeter och facade_height finns:
-  fasad_area = perimeter × facade_height
-  Dra bort fönster och dörrar: fasad_area_netto = fasad_area − (antal_fönster × 1,5) − (antal_dörrar × 2,0)
-Redovisa alltid din beräkning i job_summary."""
+AREALBERÄKNING:
+  fasad_area angiven → använd direkt
+  saknas → fasad_area = perimeter × fasadhöjd − (fönster × 1,5) − (dörrar × 2,0)
+Redovisa alltid beräkningen i job_summary."""
 
 
 # ═════════════════════════════════════════════════════════════════════
-# JOBBTYPSSPECIFIK CHECKLISTA — ALTAN
+# CHECKLISTA — ALTAN
 # ═════════════════════════════════════════════════════════════════════
 ALTAN_CHECKLIST = """
 
 ═══ OBLIGATORISK CHECKLISTA FÖR ALTAN/TRALL ═══
 Detta block gäller för detta jobb (job_type=altan).
 
-Innan du returnerar JSON-svaret: gå igenom listan nedan. För VARJE punkt
-måste du antingen (a) lägga till motsvarande rad(er) i offerten, eller
-(b) skriva i "assumptions"-arrayen varför punkten inte gäller för
-detta specifika jobb.
-
+Gå igenom listan nedan. För VARJE punkt måste du antingen
+(a) lägga till motsvarande rad(er) i offerten, eller
+(b) skriva i "assumptions"-arrayen varför punkten inte gäller.
 DET ÄR INTE TILLÅTET ATT TYST HOPPA ÖVER EN PUNKT.
 
-═══ VIKTIGT OM ENHETER OCH PRISER I work_norms ═══
-work_norms-rader anger TIMMAR per enhet (hours_per), INTE kronor.
-För dessa rader ska du:
-  - Sätt source_id = norm-radens id
-  - Sätt quantity = antal enheter (kvm, lpm, st, post osv.)
-  - Sätt unit_price = 0 och total = 0
-  - Backend räknar AUTOMATISKT om unit_price = hours_per × hourly_rate
-För material_prices, disposal_costs, equipment_rental: dessa ÄR i kronor.
-  - Använd unit_price = postens price-värde direkt.
+═══ VIKTIGT OM work_norms ═══
+work_norms anger TIMMAR per enhet, INTE kronor.
+  - unit_price = 0, total = 0 (backend räknar om automatiskt)
+material_prices, disposal_costs, equipment_rental ÄR i kronor.
+  - unit_price = postens price-värde direkt
 
-[1] Etablering & avetablering — backend lägger in detta automatiskt.
-    Skapa INGEN egen rad för etablering eller avetablering.
-    Även om du ser etableringsposter i prislådan: HOPPA ÖVER DEM.
+[1] Etablering & avetablering — backend lägger in automatiskt.
+    Skapa INGEN egen rad. Skapa INTE kategorin "Etablering & resa".
 
 [2] Markförberedelse och grundläggning — KRÄVS alltid.
-    Välj rätt grundningsmetod baserat på ground_type och altan_height:
-    - Betongplintar (vanligast, markplan): norm "Sätta betongplint på fast mark" × antal plintar
-      Räkna antal plintar: en plint per 1,2 m längs reglar, c/c 1,2 m.
-      Formel: antal plintar ≈ (altanbredd / 1,2) × (altanlängd / 1,2)
-    - Krinner skruvplintar (om ground_type=lös jord/lera/svag bärighet ELLER
-      altan_height > 0,6 m): norm "Sätta plintar Krinner skruvplint" × antal
+    Välj STRIKT baserat på altan_height:
+    - Höjd < 0,5 m + fast mark: betongplintar
+      norm "Sätta betongplint på fast mark" × antal
+      antal ≈ (B / 1,2) × (L / 1,2)
+    - Höjd 0,5–1,2 m ELLER lös jord: Krinner skruvplintar
+      norm "Sätta plintar Krinner skruvplint" × antal
       + material "Plint Krinner M65 skruvplint" × antal
-    - Gjuten plintfundament (om altan_height > 1,2 m ELLER tung konstruktion):
+    - Höjd > 1,2 m: gjutna plintar
       norm "Gjuta plintfundament" × antal
-    Lägg grundläggning under "Stomme & konstruktion".
+    Lägg under "Stomme & konstruktion".
 
-[3] Rivning/borttagning av befintlig altan — KRÄVS om "byta ut",
-    "ta bort", "riva befintlig" nämns i beskrivningen.
-    Använd norm för rivning av altangolv × kvm.
-    Lägg under "Rivning". Glöm inte container om det är stora volymer.
+[3] Rivning befintlig altan — KRÄVS om "byta ut"/"riva befintlig" nämns.
+    Norm rivning altangolv × kvm. Lägg under "Rivning".
 
 [4] Reglar och bärande stomme — KRÄVS alltid.
-    Välj dimension strikt baserat på altan_height:
-    - Höjd under 0,8 m → "Regel 45x95 tryckimpregnerat" × lpm
-    - Höjd 0,8–1,2 m  → "Bjälke 45x145 impregnerad" × lpm
-    - Höjd över 1,2 m → "Bjälke 45x195 impregnerad" × lpm
-    Det är ALDRIG korrekt att använda 45x195 på en altan under 0,8 m.
-    Räkna lpm reglar: (altanlängd / 0,6) × altanbredd + 2 × altanomkrets (kantreglar).
-    Norm: "Montering reglar/bärande stomme" × kvm altanarea.
-    Lägg under "Stomme & konstruktion".
+    Välj dimension STRIKT baserat på altan_height:
+    - Höjd < 0,8 m  → "Regel 45x95 tryckimpregnerat"
+    - Höjd 0,8–1,2 m → "Bjälke 45x145 impregnerad"
+    - Höjd > 1,2 m  → "Bjälke 45x195 impregnerad"
+    ALDRIG 45x195 på altan under 0,8 m.
+    lpm ≈ (L / 0,6) × B + 2 × (2B + 2L)
+    Norm "Montering reglar/bärande stomme" × kvm. Lägg under "Stomme & konstruktion".
 
-[5] Altangolv — KRÄVS alltid. Välj material baserat på quality:
-    - Standard: "Trall 28×120 furu impregnerad" ELLER "Trall 28×145 furu impregnerad"
-    - Premium: "Trall 28×145 komposit Trex" ELLER "Trall ek hyvlad 28×120" (lärk)
-    Räkna kvm med 10% spill: quantity = altanarea × 1,10
-    Norm: välj rätt monteringsnorm (standard/composite).
-    Lägg under "Ytskikt & material".
+[5] Altangolv — KRÄVS alltid.
+    - Standard: "Trall 28×120 furu impregnerad"
+    - Premium: "Trall 28×145 komposit Trex" eller lärk
+    Enhet: lpm. quantity = altanarea × 8,5 × 1,10 (8,5 lpm/kvm + 10% spill).
+    Monteringsnorm × kvm altanarea. Lägg under "Ytskikt & material".
 
 [6] Trallskruvar — KRÄVS alltid.
-    Använd "Trallskruv rostfri 5×55 (250st)" — räkna 1 förpackning per 3 kvm.
-    Lägg under "Ytskikt & material".
+    "Trallskruv rostfri 5×55 (250st)" — 1 förpackning per 3 kvm.
 
-[7] Avslutande fascia och kantbrädor — KRÄVS alltid.
-    Använd "Träpanel 22×120 fingerskarvad gran" eller anpassat kantbräde.
-    Räkna lpm = altanomkrets (2 × bredd + 2 × längd).
-    Norm: "Snickeriarbete fascia och avslut" × lpm.
-    Lägg under "Ytskikt & material".
+[7] Fascia och kantbrädor — KRÄVS alltid.
+    lpm = altanomkrets = 2×B + 2×L.
+    Norm "Snickeriarbete fascia och avslut" × lpm.
 
-[8] Räcke — KRÄVS om:
-    - altan_height > 0,5 m (krav enligt BBR), ELLER
-    - "räcke" nämns i beskrivningen eller build_params
-    Räkna räckeslängd = railing (om angett) ELLER altanomkrets minus husväggen.
-    Inkludera:
-    - "Stolpe 90×90 tryckimpregnerat" × antal stolpar (var 1,2 m) → material
-    - "Räckesspjäla furu 28×70 (set 10st)" × (räckeslängd / 1,2) → material
-    - "Räckeshandledare 45×95" × lpm räcke → material
-    - "Räcksspjäla furu 28×70 (set 10st)" × CEIL(räckeslängd / 1.2) set
-      (8–10 spjälor per meter, ett set täcker ca 1,2 lpm)
-    - Norm "Räcke 1m hög med spjälor" × lpm räcke → arbete
-    Lägg under "Stomme & konstruktion".
+[8] Räcke — KRÄVS om altan_height > 0,5 m ELLER räcke nämns.
+    Räckeslängd = railing-fältet om angivet, annars altanomkrets minus husväggen.
+    Inkludera ALLA fyra:
+    - "Stolpe 90×90 tryckimpregnerat" × CEIL(räckeslängd / 1,2) st
+    - "Räckesspjäla furu 28×70 (set 10st)" × CEIL(räckeslängd / 1,2) set
+      (1 set täcker 1,2 lpm — INTE 1 set för hela räcket)
+    - "Räckeshandledare 45×95" × räckeslängd lpm
+    - Norm "Räcke 1m hög med spjälor" × räckeslängd lpm
 
-[9] Trappa — KRÄVS om "trappa" nämns ELLER om altan_height > 0,4 m
-    och ingen befintlig trappa finns.
-    Välj norm baserat på antal steg:
-    - "Trapp 3 steg med vångstycke" × 1 post (om ≤ 3 steg)
-    - "Trapp 5 steg med vångstycke" × 1 post (om 4–5 steg)
-    Material: "Trall 28×145 furu impregnerad" för stegbrädor × lpm.
-    Lägg under "Stomme & konstruktion".
+[9] Trappa — KRÄVS om trappa nämns ELLER altan_height > 0,4 m.
+    - ≤ 3 steg: "Trapp 3 steg med vångstycke" × 1
+    - 4–5 steg: "Trapp 5 steg med vångstycke" × 1
 
-[10] Frostskyddsmatta under altan — KRÄVS om altan_height < 0,4 m
-     (krypgrund-risk) ELLER om ground_type nämner lera/fukt.
-     Använd "Frostskyddsmatta under altan" × kvm altanarea.
-     Lägg under "Stomme & konstruktion".
+[10] Frostskyddsmatta — KRÄVS om höjd < 0,4 m ELLER lera/fukt.
+     "Frostskyddsmatta under altan" × kvm.
 
 [11] Markduk fiberduk — KRÄVS ALLTID utan undantag.
-     Räkna antal rullar: CEIL(altanarea / 25).
-     Använd "Markduk fiberduk 1×25m" × antal rullar.
-     Typ: material. Lägg under "Stomme & konstruktion".
+     Antal rullar = CEIL(altanarea / 25).
+     "Markduk fiberduk 1×25m" × antal rullar. Typ: material.
      DET ÄR INTE TILLÅTET ATT HOPPA ÖVER DENNA POST.
 
-[12] Pergola/tak — KRÄVS om "pergola", "tak", "solskydd", "carport"
-     nämns i beskrivningen.
-     Norm: "Pergola tak inkl. reglar" × kvm.
-     Material: "OSB-skiva 18mm 244×122" × antal skivor om tätt tak.
-     Lägg under "Stomme & konstruktion".
+[12] Pergola/tak — KRÄVS om pergola/tak/solskydd nämns.
+     Norm "Pergola tak inkl. reglar" × kvm.
 
-[13] Skruv förbrukning och småvaror — KRÄVS alltid.
-     Justeringsbeslag, vinkelbeslag, skruvar för stomme.
-     Använd "Skruv förbrukning + småvaror" som fast post.
-     Lägg under "Ytskikt & material".
+[13] Skruv förbrukning och småvaror — KRÄVS alltid. Fast post.
 
-[14] Jordborr — KRÄVS om Krinner-plintar används ELLER altan_height > 0,8 m.
-     Använd "Jordborr Bokay till plintar" från equipment_rental × antal dagar.
-     Lägg under "Hyrutrustning".
+[14] Jordborr — KRÄVS om Krinner används ELLER höjd > 0,8 m.
+     "Jordborr Bokay till plintar" × antal dagar. Lägg under "Hyrutrustning".
 
-[15] Slutbesiktning med kund — KRÄVS alltid.
-     Norm "Slutbesiktning med kund" × 1 post.
-     Lägg under "Efterarbete".
+[15] Slutbesiktning med kund — KRÄVS alltid. Norm × 1 post.
 
-[16] Plastning och skydd ytor — KRÄVS om altanen byggs intill hus
-     med känsliga ytor (puts, panel, fönster nära).
-     Norm "Plastning skydd ytor och inventarier" × lpm husfasad.
-     Lägg under "Förberedelse".
+[16] Plastning skydd ytor — KRÄVS om känslig fasad/fönster intill.
+     Norm × lpm husfasad. Lägg under "Förberedelse".
 
-[17] Resor och trängselskatt — backend räknar AUTOMATISKT.
-     Skapa INGEN egen rad för resor eller trängselskatt.
+[17] Resor/trängselskatt — backend räknar automatiskt. Skapa INGEN rad.
 
-MÅTTBERÄKNING — SÅ HÄR RÄKNAR DU:
-Om altan_dimensions är angiven (B×L i meter):
+MÅTTBERÄKNING:
   altanarea = B × L
-  altanomkrets = 2 × (B + L)
-Om INTE angiven men floor_sqm finns: använd floor_sqm som altanarea.
-Redovisa alltid din beräkning i job_summary, t.ex.:
-  "Altan 4,0 × 6,0 m = 24 kvm. Omk. 20 lpm. Höjd 0,8 m → räcke krävs."
+  altanomkrets = 2×B + 2×L
+Redovisa alltid i job_summary, t.ex.:
+  "Altan 4,0×6,0 m = 24 kvm. Omk. 20 lpm. Höjd 0,5 m → Krinner + räcke krävs."
 
-MATERIALVAL — SNABBGUIDE:
-  Standard + låg höjd (<0,5m): furu impregnerad + betongplintar
-  Standard + medelhöjd (0,5–1,2m): furu impregnerad + Krinner
-  Premium oavsett: komposit eller lärk + Krinner eller gjutna plintar
-  Hög höjd (>1,2m): alltid gjutna plintar + bjälkar 45×195"""
+MATERIALVAL SNABBGUIDE:
+  Höjd < 0,5 m + fast mark → betongplintar + regel 45×95 + furu
+  Höjd 0,5–1,2 m           → Krinner + regel 45×95 + furu
+  Höjd > 1,2 m             → gjutna plintar + bjälke 45×195
+  Premium                   → Krinner/gjutna + komposit eller lärk"""
+
 
 # ═════════════════════════════════════════════════════════════════════
 # Hämta prislådan från Supabase via RPC
@@ -497,10 +404,6 @@ async def fetch_pricing_context(
     quality: str = "standard",
     region: str = "default",
 ) -> dict:
-    """
-    Anropar Postgres-funktionen get_pricing_context som returnerar
-    hela prislådan i ett enda anrop.
-    """
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         return _empty_pricing_context()
 
@@ -522,7 +425,6 @@ async def fetch_pricing_context(
             )
         if r.status_code == 200:
             data = r.json() or {}
-            # Säkerställ att alla nycklar finns med tomma listor om null
             for key in ["work_norms", "material_prices", "subcontractor_prices",
                         "disposal_costs", "equipment_rental", "overhead_costs"]:
                 if data.get(key) is None:
@@ -548,12 +450,10 @@ def _empty_pricing_context() -> dict:
 # Formatera prislådan som prompt-text
 # ═════════════════════════════════════════════════════════════════════
 def _format_pricing_for_prompt(ctx: dict) -> str:
-    """Bygger en strukturerad sektion till AI:ns prompt med all prislådan."""
     parts = ["\n\n═══════════════════════════════════════════════════════════════════"]
     parts.append("PRISLÅDA FÖR DETTA JOBB — ANVÄND DESSA EXAKT, GISSA ALDRIG PRISER")
     parts.append("═══════════════════════════════════════════════════════════════════")
 
-    # ── Arbetstidsnormer ──
     if ctx["work_norms"]:
         parts.append("\n── ARBETSTIDSNORMER (timmar per enhet) ──")
         for n in ctx["work_norms"]:
@@ -563,41 +463,35 @@ def _format_pricing_for_prompt(ctx: dict) -> str:
     else:
         parts.append("\n── ARBETSTIDSNORMER: (inga normer i databasen för denna jobbtyp) ──")
 
-    # ── Materialpriser ──
     if ctx["material_prices"]:
         parts.append("\n── MATERIALPRISER (kr per enhet) ──")
         for m in ctx["material_prices"]:
             quality = f" [{m['quality_tier']}]" if m.get('quality_tier') else ""
             parts.append(f"  id={m['id']} | {m['label']}{quality}: {m['price']} kr/{m['unit']}")
 
-    # ── Underentreprenörer ──
     if ctx["subcontractor_prices"]:
         parts.append("\n── UNDERENTREPRENÖRSPRISER ──")
         for s in ctx["subcontractor_prices"]:
             parts.append(f"  id={s['id']} | [{s['trade']}/{s['scope']}] {s['description']}: {s['price']} kr/{s['unit']}")
 
-    # ── Sophantering ──
     if ctx["disposal_costs"]:
         parts.append("\n── SOPHANTERING & DEPONI ──")
         for d in ctx["disposal_costs"]:
             cat = f" [{d['category']}]" if d.get('category') else ""
             parts.append(f"  id={d['id']} | {d['label']}{cat}: {d['price']} kr/{d['unit']}")
 
-    # ── Hyrutrustning ──
     if ctx["equipment_rental"]:
-        parts.append("\n── HYRUTRUSTNING (bara saker som faktiskt hyrs — sågar etc. äger företaget) ──")
+        parts.append("\n── HYRUTRUSTNING ──")
         for e in ctx["equipment_rental"]:
             parts.append(f"  id={e['id']} | {e['label']}: {e['price']} kr/{e['unit']}")
 
-    # ── Overhead (etablering, resor, frakt) ──
     if ctx["overhead_costs"]:
         parts.append("\n── ETABLERING, RESOR, FRAKT, TRÄNGSELSKATT ──")
-        parts.append("  (backend lägger in dessa automatiskt baserat på jobbets storlek)")
+        parts.append("  (backend lägger in dessa automatiskt — skapa INGA egna rader)")
         for o in ctx["overhead_costs"]:
             trigger = f" [endast om: {o['trigger_rule']}]" if o.get('trigger_rule') else ""
             parts.append(f"  id={o['id']} | {o['label']} ({o['calc_type']}): {o['rate']} {o['unit']}{trigger}")
 
-    # ── Regional ──
     r = ctx["regional"]
     parts.append(f"\n── REGION: {r['region']} ──")
     parts.append(f"  Arbete-faktor: {r['labor_factor']}, Material-faktor: {r['material_factor']}, UE-faktor: {r['ue_factor']}")
@@ -612,23 +506,17 @@ def _format_pricing_for_prompt(ctx: dict) -> str:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# Adressanalys: är adressen innanför Stockholms tullar?
+# Adressanalys
 # ═════════════════════════════════════════════════════════════════════
 def _is_inside_stockholm_tolls(address: str) -> bool:
-    """
-    Heuristik för att avgöra om en adress troligen är innanför Stockholms tullar.
-    Inte perfekt — för exakt geofencing behövs Mapbox/Google Geocoding.
-    """
     if not address:
         return False
     addr = address.lower()
-    # Postnummer 100-119 är ungefär innerstaden
     pnr_match = re.search(r'\b(1[0-1][0-9])\s*\d{2}\b', addr)
     if pnr_match:
         pnr_prefix = int(pnr_match.group(1))
         if 100 <= pnr_prefix <= 119:
             return True
-    # Kända innerstadsområden
     inner_areas = [
         "vasastan", "östermalm", "ostermalm", "södermalm", "sodermalm",
         "kungsholmen", "norrmalm", "gamla stan", "djurgården", "djurgarden",
@@ -638,7 +526,6 @@ def _is_inside_stockholm_tolls(address: str) -> bool:
 
 
 def _is_inside_goteborg_tolls(address: str) -> bool:
-    """Heuristik för Göteborgs trängselskatte-zon."""
     if not address:
         return False
     addr = address.lower()
@@ -651,7 +538,6 @@ def _is_inside_goteborg_tolls(address: str) -> bool:
 
 
 def _detect_region_from_address(address: str) -> str:
-    """Returnerar regionnyckel som matchar regional_multipliers-tabellen."""
     if not address:
         return "default"
     addr = address.lower()
@@ -783,9 +669,8 @@ def _apply_overhead_rules(
     job_type: str,
 ) -> None:
     """
-    Lägger till overhead-rader (resor, trängselskatt, frakt) baserat på
-    overhead_costs-tabellens trigger_rule. Detta görs INTE av AI:n —
-    backend har sista ordet eftersom reglerna är deterministiska.
+    Lägger till overhead-rader deterministiskt från overhead_costs-tabellen.
+    AI:ns eventuella "Etablering & resa"-kategori tas bort och ersätts helt.
     """
     overhead_rows = []
 
@@ -799,8 +684,8 @@ def _apply_overhead_rules(
                 material_total += qty * price
 
     for o in pricing_ctx.get("overhead_costs", []):
-        calc = o.get("calc_type")
-        rate = float(o.get("rate", 0))
+        calc    = o.get("calc_type")
+        rate    = float(o.get("rate", 0))
         trigger = o.get("trigger_rule") or ""
 
         # Resor
@@ -808,13 +693,13 @@ def _apply_overhead_rules(
             total = round(distance_km * 2 * rate * work_days)
             overhead_rows.append({
                 "description": o["label"],
-                "note":   f"{distance_km}km × 2 × {rate}kr × {work_days} resedagar",
-                "unit":   "kr",
-                "quantity": 1,
-                "unit_price": total,
-                "total":      total,
-                "type":   "overhead",
-                "source_id":  o["id"],
+                "note":        f"{distance_km}km × 2 × {rate}kr × {work_days} resedagar",
+                "unit":        "km",
+                "quantity":    1,
+                "unit_price":  total,
+                "total":       total,
+                "type":        "overhead",
+                "source_id":   o["id"],
             })
 
         # Trängselskatt
@@ -823,13 +708,13 @@ def _apply_overhead_rules(
                 total = round(rate * work_days)
                 overhead_rows.append({
                     "description": o["label"],
-                    "note":   f"{rate}kr × {work_days} arbetsdagar innanför tullarna",
-                    "unit":   "kr",
-                    "quantity": 1,
-                    "unit_price": total,
-                    "total":      total,
-                    "type":   "overhead",
-                    "source_id":  o["id"],
+                    "note":        f"{rate}kr × {work_days} arbetsdagar innanför tullarna",
+                    "unit":        "dag",
+                    "quantity":    work_days,
+                    "unit_price":  round(rate),
+                    "total":       total,
+                    "type":        "overhead",
+                    "source_id":   o["id"],
                 })
 
         # Etablering / avetablering / fasta poster
@@ -837,15 +722,19 @@ def _apply_overhead_rules(
             include = False
             if not trigger:
                 include = True
-overhead_rows.append({
+            elif trigger == "fasad OR material_total>15000":
+                include = (job_type == "fasad") or (material_total > 15000)
+            if include:
+                total = round(rate)
+                overhead_rows.append({
                     "description": o["label"],
-                    "note":   o.get("notes") or "",
-                    "unit":   "post",
-                    "quantity": 1,
-                    "unit_price": total,
-                    "total":      total,
-                    "type":   "overhead",
-                    "source_id":  o["id"],
+                    "note":        o.get("notes") or "",
+                    "unit":        "post",
+                    "quantity":    1,
+                    "unit_price":  total,
+                    "total":       total,
+                    "type":        "overhead",
+                    "source_id":   o["id"],
                 })
 
     if overhead_rows:
@@ -856,36 +745,25 @@ overhead_rows.append({
         ]
         # Lägg in backends deterministiska version som första kategori
         data.setdefault("categories", []).insert(0, {
-            "name": "Etablering & resa",
-            "rows": overhead_rows,
+            "name":     "Etablering & resa",
+            "rows":     overhead_rows,
             "subtotal": sum(r["total"] for r in overhead_rows),
         })
 
 
+# ═════════════════════════════════════════════════════════════════════
+# Räkna om work_norms-rader till kronor
+# ═════════════════════════════════════════════════════════════════════
 def _apply_work_norms_pricing(
-  
-    Räknar om unit_price för alla rader vars source_id pekar på en work_norms-rad.
-
-    BAKGRUND:
-      work_norms-tabellen lagrar hours_per (timmar per enhet), INTE kronor.
-      AI:n förstår inte alltid skillnaden och har skickat in hours_per som
-      unit_price (resultat: rader som "Skyddstäckning trapphus 4 vån × 2 kr = 8 kr"
-      istället för "4 vån × 2 h × 650 kr = 5 200 kr").
-
-      Den här funktionen är SANNINGEN: om en rad refererar till en work_norms-id
-      via source_id, så bestäms unit_price av (hours_per × hourly_rate),
-      oavsett vad AI:n skickade in.
-
-    SIDOEFFEKTER:
-      - Skriver över row["unit_price"] när source_id matchar en work_norm
-      - Lägger till row["_correction"] med info om vad som ändrades
-      - Ackumulerar en lista i data["corrections"] för debugging/observability
-
-    ANROPAS:
-      Mellan _apply_overhead_rules och recalculate_totals.
-      recalculate_totals räknar sedan total = quantity × unit_price som vanligt.
+    data: dict,
+    pricing_ctx: dict,
+    hourly_rate: float,
+) -> None:
     """
-    # Bygg lookup: work_norm_id -> hours_per
+    Räknar om unit_price för alla rader vars source_id pekar på en work_norms-rad.
+    work_norms lagrar hours_per (timmar per enhet), INTE kronor.
+    Denna funktion är sanningen: source_id → hours_per × hourly_rate.
+    """
     norms_by_id: Dict[str, float] = {}
     for n in pricing_ctx.get("work_norms", []) or []:
         nid = str(n.get("id") or "")
@@ -911,33 +789,32 @@ def _apply_work_norms_pricing(
             if hours_per is None:
                 continue
 
-            # Detta är en work_norms-rad. Räkna om unit_price deterministiskt.
             correct_unit_price = round(hours_per * rate)
             ai_unit_price = float(row.get("unit_price") or 0)
 
             row["unit_price"] = correct_unit_price
-            # Säkerställ att type är 'labor' eftersom work_norms är arbete
             if row.get("type") not in ("labor", None, ""):
-                # Lämna AI:ns val ifred om den medvetet kategoriserat annorlunda
                 pass
             else:
                 row["type"] = "labor"
 
-            # Spara debugging-info
             if abs(correct_unit_price - ai_unit_price) > 1:
                 corrections.append({
-                    "description":     row.get("description", ""),
-                    "source_id":       source_id,
-                    "ai_unit_price":   round(ai_unit_price),
+                    "description":        row.get("description", ""),
+                    "source_id":          source_id,
+                    "ai_unit_price":      round(ai_unit_price),
                     "correct_unit_price": correct_unit_price,
-                    "hours_per":       hours_per,
-                    "hourly_rate":     rate,
+                    "hours_per":          hours_per,
+                    "hourly_rate":        rate,
                 })
 
     if corrections:
         data.setdefault("corrections", []).extend(corrections)
 
 
+# ═════════════════════════════════════════════════════════════════════
+# Deterministisk totalkalkyl
+# ═════════════════════════════════════════════════════════════════════
 def recalculate_totals(
     data: dict,
     hourly_rate: float,
@@ -945,10 +822,7 @@ def recalculate_totals(
     include_rot: bool,
     ue_markup_pct: float = 12.5,
 ) -> dict:
-    """
-    Räknar alltid om totals deterministiskt från raderna.
-    Litar aldrig på AI:ns aritmetik.
-    """
+    """Räknar alltid om totals deterministiskt. Litar aldrig på AI:ns aritmetik."""
     material_total      = 0.0
     labor_total         = 0.0
     equipment_total     = 0.0
@@ -978,11 +852,9 @@ def recalculate_totals(
     margin_pct_val    = float(margin_pct or 15)
     ue_markup_pct_val = float(ue_markup_pct or 12.5)
 
-    # Eget: arbete + material + utrustning + deponi + overhead får ordinarie påslag
-    own_subtotal  = material_total + labor_total + equipment_total + disposal_total + overhead_total
-    own_margin    = round(own_subtotal * margin_pct_val / 100)
-    ue_markup     = round(subcontractor_total * ue_markup_pct_val / 100)
-
+    own_subtotal    = material_total + labor_total + equipment_total + disposal_total + overhead_total
+    own_margin      = round(own_subtotal * margin_pct_val / 100)
+    ue_markup       = round(subcontractor_total * ue_markup_pct_val / 100)
     subtotal_ex_vat = round(own_subtotal + own_margin + subcontractor_total + ue_markup)
     vat             = round(subtotal_ex_vat * 0.25)
     total_inc_vat   = round(subtotal_ex_vat + vat)
@@ -1005,7 +877,7 @@ def recalculate_totals(
         "overhead_total":      round(overhead_total),
         "own_margin":          own_margin,
         "ue_markup":           ue_markup,
-        "margin_amount":       own_margin + ue_markup,  # bakåtkompatibilitet
+        "margin_amount":       own_margin + ue_markup,
         "subtotal":            round(own_subtotal + subcontractor_total),
         "subtotal_ex_vat":     subtotal_ex_vat,
         "total_ex_vat":        subtotal_ex_vat,
@@ -1028,12 +900,6 @@ def recalculate_totals(
 # Spårbarhet: bygg en debug-snapshot per offert
 # ═════════════════════════════════════════════════════════════════════
 def _build_pricing_snapshot(data: dict, pricing_ctx: dict) -> dict:
-    """
-    För varje rad i offerten — koppla source_id till motsvarande databasrad
-    och returnera en snapshot. Detta sparas tillsammans med offerten så ni
-    kan i efterhand se exakt vilka databasrader som användes.
-    """
-    # Bygg id → källrad-mapping
     id_to_source = {}
     for n in pricing_ctx.get("work_norms", []):
         id_to_source[str(n["id"])] = {"table": "work_norms", **n}
@@ -1059,19 +925,19 @@ def _build_pricing_snapshot(data: dict, pricing_ctx: dict) -> dict:
                 estimated_count += 1
                 snapshot_rows.append({
                     "row_description": row.get("description"),
-                    "row_total":  row.get("total"),
-                    "source_id":  sid or "MISSING",
-                    "source":     None,
-                    "category":   cat.get("name"),
+                    "row_total":       row.get("total"),
+                    "source_id":       sid or "MISSING",
+                    "source":          None,
+                    "category":        cat.get("name"),
                 })
             elif sid in id_to_source:
                 matched_count += 1
                 snapshot_rows.append({
                     "row_description": row.get("description"),
-                    "row_total":  row.get("total"),
-                    "source_id":  sid,
-                    "source":     id_to_source[sid],
-                    "category":   cat.get("name"),
+                    "row_total":       row.get("total"),
+                    "source_id":       sid,
+                    "source":          id_to_source[sid],
+                    "category":        cat.get("name"),
                 })
 
     return {
@@ -1088,7 +954,7 @@ def _build_pricing_snapshot(data: dict, pricing_ctx: dict) -> dict:
 async def generate_estimate(
     description: str,
     job_type: Optional[str] = None,
-    area_sqm: Optional[float] = None,           # Bakåtkompatibilitet
+    area_sqm: Optional[float] = None,
     location: Optional[str] = None,
     address: Optional[str] = None,
     distance_km: Optional[float] = None,
@@ -1105,7 +971,7 @@ async def generate_estimate(
     **kwargs,
 ) -> dict:
 
-    # ── 1. Härled region från adress eller location ──
+    # ── 1. Härled region ──
     if address:
         region = _detect_region_from_address(address)
     else:
@@ -1127,10 +993,15 @@ async def generate_estimate(
         region=region,
     )
 
-    # ── 4. Bygg system-prompt med prislåda + jobbtypsspecifik checklista ──
+    # ── 4. Bygg system-prompt med jobbtypsspecifik checklista ──
     system = SYSTEM_PROMPT_BASE
-    if (job_type or "").lower() == "rivning":
+    jt = (job_type or "").lower()
+    if jt == "rivning":
         system += RIVNING_CHECKLIST
+    elif jt == "fasad":
+        system += FASAD_CHECKLIST
+    elif jt == "altan":
+        system += ALTAN_CHECKLIST
     system += _format_pricing_for_prompt(pricing_ctx)
 
     # ── 5. Bygg user-text ──
@@ -1180,7 +1051,7 @@ async def generate_estimate(
         response = await client.chat.completions.create(
             model="gpt-4o",
             messages=messages,
-            temperature=0.2,            # lägre temp eftersom vi vill ha exakta priser
+            temperature=0.2,
             max_tokens=4500,
             response_format={"type": "json_object"},
         )
@@ -1190,9 +1061,7 @@ async def generate_estimate(
         # ── 7. Backend lägger till deterministiska overhead-rader ──
         _apply_overhead_rules(data, pricing_ctx, distance_km, work_days, inside_tolls, job_type or "ovrigt")
 
-        # ── 7b. Backend räknar om work_norms-rader till kronor ──
-        # AI:n missförstår ibland att work_norms.hours_per är timmar (inte kr).
-        # Den här funktionen är sanningen: source_id → hours_per × hourly_rate.
+        # ── 7b. Räkna om work_norms-rader till kronor ──
         _apply_work_norms_pricing(data, pricing_ctx, hourly_rate or 650)
 
         # ── 8. Räkna om totals ──
@@ -1204,10 +1073,10 @@ async def generate_estimate(
             ue_markup_pct=ue_markup_pct or 12.5,
         )
 
-        # ── 9. Bygg pricing snapshot för spårbarhet ──
+        # ── 9. Bygg pricing snapshot ──
         data["pricing_snapshot"] = _build_pricing_snapshot(data, pricing_ctx)
 
-        # ── 10. Lägg metadata om jobbet ──
+        # ── 10. Metadata ──
         data["meta"] = {
             **data.get("meta", {}),
             "region":       region,
@@ -1227,7 +1096,7 @@ async def generate_estimate(
 
 
 # ═════════════════════════════════════════════════════════════════════
-# Chat (oförändrad)
+# Chat
 # ═════════════════════════════════════════════════════════════════════
 async def chat_about_estimate(message: str, context: Optional[dict] = None) -> str:
     system = "Du är en hjälpsam svensk byggkalkylator-assistent. Svara kort och konkret på svenska."
@@ -1247,10 +1116,9 @@ async def chat_about_estimate(message: str, context: Optional[dict] = None) -> s
 
 
 # ═════════════════════════════════════════════════════════════════════
-# Bakåtkompatibilitet med tidigare kod
+# Bakåtkompatibilitet
 # ═════════════════════════════════════════════════════════════════════
 async def fetch_norms(job_type: str, house_age: str = "all") -> str:
-    """Behålls för /api/norms-endpointen — ger en text-version av work_norms."""
     ctx = await fetch_pricing_context(job_type=job_type, quality="standard", region="default")
     norms = ctx.get("work_norms", [])
     if not norms:
