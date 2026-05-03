@@ -710,11 +710,11 @@ def _build_user_text(
 
     # Injektera rivnings-specifik info direkt i beskrivningen
     if build_params and build_params.get("ground_type") == "utan hiss":
-        floor = build_params.get("floor_number", "").replace(" tr", "")
-    if floor:
-        description = description + f"\n\nVIKTIGT: Arbetsplatsen är på {floor} tr UTAN HISS. Bär-tillägg krävs. Skyddstäckning av trapphus krävs från entré upp till våning {floor}."
-    else:
-        description = description + "\n\nVIKTIGT: Utan hiss. Bär-tillägg krävs."
+        floor = build_params.get("floor_number", "").replace(" tr", "").strip()
+        if floor:
+            description = description + f"\n\nVIKTIGT: Arbetsplatsen är på {floor} tr UTAN HISS. Bär-tillägg krävs. Skyddstäckning av trapphus krävs från entré upp till våning {floor}."
+        else:
+            description = description + "\n\nVIKTIGT: Utan hiss. Bär-tillägg krävs."
     if build_params:
         LABELS = {
             "room_dimensions":   "Rumsmått (B×L)",
