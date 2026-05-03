@@ -389,10 +389,12 @@ För material_prices, disposal_costs, equipment_rental: dessa ÄR i kronor.
     Lägg under "Rivning". Glöm inte container om det är stora volymer.
 
 [4] Reglar och bärande stomme — KRÄVS alltid.
-    Välj material baserat på quality och altan_height:
-    - Standard: "Regel 45x95 tryckimpregnerat" × lpm
-      Räkna lpm reglar: (altanlängd / 0,6) × altanbredd + 2 × altanomkrets (kantreglar)
-    - Bjälkar vid höga altaner (>0,8 m): "Bjälke 45x195 impregnerad" × lpm
+    Välj dimension strikt baserat på altan_height:
+    - Höjd under 0,8 m → "Regel 45x95 tryckimpregnerat" × lpm
+    - Höjd 0,8–1,2 m  → "Bjälke 45x145 impregnerad" × lpm
+    - Höjd över 1,2 m → "Bjälke 45x195 impregnerad" × lpm
+    Det är ALDRIG korrekt att använda 45x195 på en altan under 0,8 m.
+    Räkna lpm reglar: (altanlängd / 0,6) × altanbredd + 2 × altanomkrets (kantreglar).
     Norm: "Montering reglar/bärande stomme" × kvm altanarea.
     Lägg under "Stomme & konstruktion".
 
