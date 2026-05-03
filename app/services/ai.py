@@ -172,11 +172,18 @@ Det är BÄTTRE att gissa och flagga ESTIMATED än att utelämna posten.
     rivning per dag" — finns den, använd den. Annars ESTIMATED.
 
 [3] Skyddstäckning trapphus — KRÄVS ALLTID när description innehåller
-    "flerbostadshus", "BRF", "tr", "utan hiss" eller "våning".
-    Det är INTE TILLÅTET att hoppa över denna punkt utan explicit
-    motivering i assumptions. Lägg ALLTID med dessa två rader:
-    - Arbete: norm "Skyddstäckning trapphus per våningsplan" × antal våningar
-    - Material: post "Skyddstäckning trapphus — material" × 1 post
+    något av: "flerbostadshus", "BRF", "tr", "utan hiss", "våning",
+    "trapphus", "lägenhet".
+    DET ÄR INTE TILLÅTET ATT HOPPA ÖVER DENNA PUNKT utan explicit
+    motivering i assumptions.
+    Lägg ALLTID med dessa två rader:
+    - Arbete: norm "Skyddstäckning trapphus per våningsplan"
+      × antal våningar (t.ex. 3 vån → quantity = 3)
+    - Material: välj rätt post baserat på antal våningar:
+      * 1–4 vån → "Skyddstäckning trapphus — material" (2 200 kr/post)
+      * 5+ vån  → "Skyddstäckning trapphus — material (5+ vån)" (3 400 kr/post)
+    Lägg båda under kategori "Förberedelse".
+    EXEMPEL: "3 tr utan hiss" → quantity = 3 för arbete, material 1 post à 2 200 kr.
 
 [4] Bär-tillägg — KRÄVS när ground_type ELLER description innehåller
     något av: "utan hiss", "X tr", "X vån", "trappa", "ej hiss".
