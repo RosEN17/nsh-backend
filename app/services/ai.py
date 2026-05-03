@@ -382,10 +382,12 @@ För material_prices, disposal_costs, equipment_rental: dessa ÄR i kronor.
     Lägg under "Rivning". Glöm inte container om det är stora volymer.
 
 [4] Reglar och bärande stomme — KRÄVS alltid.
-    Välj material baserat på quality och altan_height:
-    - Standard: "Regel 45x95 tryckimpregnerat" × lpm
-      Räkna lpm reglar: (altanlängd / 0,6) × altanbredd + 2 × altanomkrets (kantreglar)
-    - Bjälkar vid höga altaner (>0,8 m): "Bjälke 45x195 impregnerad" × lpm
+    Välj dimension strikt baserat på altan_height:
+    - Höjd under 0,8 m → "Regel 45x95 tryckimpregnerat" × lpm
+    - Höjd 0,8–1,2 m  → "Bjälke 45x145 impregnerad" × lpm
+    - Höjd över 1,2 m → "Bjälke 45x195 impregnerad" × lpm
+    Det är ALDRIG korrekt att använda 45x195 på en altan under 0,8 m.
+    Räkna lpm reglar: (altanlängd / 0,6) × altanbredd + 2 × altanomkrets (kantreglar).
     Norm: "Montering reglar/bärande stomme" × kvm altanarea.
     Lägg under "Stomme & konstruktion".
 
@@ -430,12 +432,12 @@ För material_prices, disposal_costs, equipment_rental: dessa ÄR i kronor.
      Använd "Frostskyddsmatta under altan" × kvm altanarea.
      Lägg under "Stomme & konstruktion".
 
-[11] Markduk fiberduk — KRÄVS alltid under altanen för ogrässkydd.
-     Använd "Markduk fiberduk 1×25m" × kvm altanarea (beräkna antal rullar).
-     Singel/grus som dränering: "Singel/grus 0–8 storsäck" om ground_type
-     indikerar behov (lera, fuktig mark).
-     Lägg under "Stomme & konstruktion".
-
+[11] [11] Markduk fiberduk — KRÄVS ALLTID utan undantag.
+     Räkna antal rullar: CEIL(altanarea / 25).
+     Använd "Markduk fiberduk 1×25m" × antal rullar.
+     Typ: material. Lägg under "Stomme & konstruktion".
+     DET ÄR INTE TILLÅTET ATT HOPPA ÖVER DENNA POST.
+     
 [12] Pergola/tak — KRÄVS om "pergola", "tak", "solskydd", "carport"
      nämns i beskrivningen.
      Norm: "Pergola tak inkl. reglar" × kvm.
