@@ -837,11 +837,7 @@ def _apply_overhead_rules(
             include = False
             if not trigger:
                 include = True
-            elif trigger == "fasad OR material_total>15000":
-                include = (job_type == "fasad") or (material_total > 15000)
-            if include:
-                total = round(rate)
-                overhead_rows.append({
+overhead_rows.append({
                     "description": o["label"],
                     "note":   o.get("notes") or "",
                     "unit":   "post",
@@ -851,7 +847,8 @@ def _apply_overhead_rules(
                     "type":   "overhead",
                     "source_id":  o["id"],
                 })
-if overhead_rows:
+
+    if overhead_rows:
         # Ta bort AI:ns etableringsrader helt — backend har alltid sista ordet
         data["categories"] = [
             c for c in data.get("categories", [])
@@ -863,12 +860,10 @@ if overhead_rows:
             "rows": overhead_rows,
             "subtotal": sum(r["total"] for r in overhead_rows),
         })
+
+
 def _apply_work_norms_pricing(
-    data: dict,
-    pricing_ctx: dict,
-    hourly_rate: float,
-) -> None:
-    """
+  
     Räknar om unit_price för alla rader vars source_id pekar på en work_norms-rad.
 
     BAKGRUND:
