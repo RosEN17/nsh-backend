@@ -132,12 +132,8 @@ OBS: "totals" och "meta" lämnas tomma — backend räknar deterministiskt."""
 # JOBBTYPSSPECIFIK CHECKLISTA — RIVNING
 # ═════════════════════════════════════════════════════════════════════
 # Detta block injekteras till SYSTEM_PROMPT_BASE endast när
-# job_type == "rivning". Syftet är att tvinga AI:n att aktivt resonera
-# kring de poster som tidigare tyst utelämnats (förbrukningsmaterial,
-# bär-tillägg, skyddstäckning trapphus, deponi, etc.).
-#
-# Lägg till motsvarande checklistor för "fasad" och "altan" när
-# respektive prislåda är auditerad.
+# job_type == "rivning". Lägg till motsvarande checklistor för "fasad"
+# och "altan" när respektive prislåda är auditerad.
 RIVNING_CHECKLIST = """
 
 ═══ OBLIGATORISK CHECKLISTA FÖR RIVNING ═══
@@ -150,6 +146,16 @@ detta specifika jobb.
 
 DET ÄR INTE TILLÅTET ATT TYST HOPPA ÖVER EN PUNKT.
 
+═══ VIKTIGT OM ENHETER OCH PRISER I work_norms ═══
+work_norms-rader anger TIMMAR per enhet (hours_per), INTE kronor.
+För dessa rader ska du:
+  - Sätt source_id = norm-radens id
+  - Sätt quantity = antal enheter (vån, m², st, post osv.)
+  - Sätt unit_price = 0 och total = 0
+  - Backend räknar AUTOMATISKT om unit_price = hours_per × hourly_rate
+För material_prices, disposal_costs, equipment_rental: dessa ÄR i kronor.
+  - Använd unit_price = postens price-värde direkt.
+
 REGEL OM PRISLÅDA: Sök i prislådan FÖRST. Hittar du matchande post:
 använd dess id som source_id. Hittar du INGEN matchande post:
 lägg raden ändå med source_id="ESTIMATED" och din bästa uppskattning.
@@ -157,6 +163,7 @@ Det är BÄTTRE att gissa och flagga ESTIMATED än att utelämna posten.
 
 [1] Etablering & avetablering — backend lägger in detta automatiskt
     från overhead_costs. Skapa INGEN egen rad för dessa.
+    Även om du ser etableringsposter i prislådan: HOPPA ÖVER DEM.
 
 [2] Förbrukningsmaterial (sågblad, slipskivor, skyddsutrustning,
     säckar, tejp). Räkna ~350 kr per arbetare per dag.
@@ -174,8 +181,9 @@ Det är BÄTTRE att gissa och flagga ESTIMATED än att utelämna posten.
 [4] Bär-tillägg — KRÄVS när ground_type ELLER description innehåller
     något av: "utan hiss", "X tr", "X vån", "trappa", "ej hiss".
     Använd norm "Bär-tillägg per m³ avfall per våning utan hiss".
-    Räkna: demolition_volume × antal våningar × normens hours_per.
-    Exempel: 12 m³ × 4 vån × 0,25 h = 12 timmar.
+    Sätt quantity = demolition_volume × antal våningar.
+    Exempel: 12 m³ × 4 vån = 48 enheter (backend multiplicerar
+    sedan med hours_per och hourly_rate).
 
 [5] Container för avfall — minst 1 st. Vid demolition_volume > 10 m³
     behövs antingen 2 vändor av 10 m³, eller en 15 m³.
@@ -598,6 +606,86 @@ def _apply_overhead_rules(
             })
 
 
+def _apply_work_norms_pricing(
+    data: dict,
+    pricing_ctx: dict,
+    hourly_rate: float,
+) -> None:
+    """
+    Räknar om unit_price för alla rader vars source_id pekar på en work_norms-rad.
+
+    BAKGRUND:
+      work_norms-tabellen lagrar hours_per (timmar per enhet), INTE kronor.
+      AI:n förstår inte alltid skillnaden och har skickat in hours_per som
+      unit_price (resultat: rader som "Skyddstäckning trapphus 4 vån × 2 kr = 8 kr"
+      istället för "4 vån × 2 h × 650 kr = 5 200 kr").
+
+      Den här funktionen är SANNINGEN: om en rad refererar till en work_norms-id
+      via source_id, så bestäms unit_price av (hours_per × hourly_rate),
+      oavsett vad AI:n skickade in.
+
+    SIDOEFFEKTER:
+      - Skriver över row["unit_price"] när source_id matchar en work_norm
+      - Lägger till row["_correction"] med info om vad som ändrades
+      - Ackumulerar en lista i data["corrections"] för debugging/observability
+
+    ANROPAS:
+      Mellan _apply_overhead_rules och recalculate_totals.
+      recalculate_totals räknar sedan total = quantity × unit_price som vanligt.
+    """
+    # Bygg lookup: work_norm_id -> hours_per
+    norms_by_id: Dict[str, float] = {}
+    for n in pricing_ctx.get("work_norms", []) or []:
+        nid = str(n.get("id") or "")
+        if nid:
+            try:
+                norms_by_id[nid] = float(n.get("hours_per") or 0)
+            except (TypeError, ValueError):
+                continue
+
+    if not norms_by_id:
+        return
+
+    rate = float(hourly_rate or 650)
+    corrections = []
+
+    for cat in data.get("categories", []) or []:
+        for row in cat.get("rows", []) or []:
+            source_id = str(row.get("source_id") or "")
+            if not source_id or source_id == "ESTIMATED":
+                continue
+
+            hours_per = norms_by_id.get(source_id)
+            if hours_per is None:
+                continue
+
+            # Detta är en work_norms-rad. Räkna om unit_price deterministiskt.
+            correct_unit_price = round(hours_per * rate)
+            ai_unit_price = float(row.get("unit_price") or 0)
+
+            row["unit_price"] = correct_unit_price
+            # Säkerställ att type är 'labor' eftersom work_norms är arbete
+            if row.get("type") not in ("labor", None, ""):
+                # Lämna AI:ns val ifred om den medvetet kategoriserat annorlunda
+                pass
+            else:
+                row["type"] = "labor"
+
+            # Spara debugging-info
+            if abs(correct_unit_price - ai_unit_price) > 1:
+                corrections.append({
+                    "description":     row.get("description", ""),
+                    "source_id":       source_id,
+                    "ai_unit_price":   round(ai_unit_price),
+                    "correct_unit_price": correct_unit_price,
+                    "hours_per":       hours_per,
+                    "hourly_rate":     rate,
+                })
+
+    if corrections:
+        data.setdefault("corrections", []).extend(corrections)
+
+
 def recalculate_totals(
     data: dict,
     hourly_rate: float,
@@ -849,6 +937,11 @@ async def generate_estimate(
 
         # ── 7. Backend lägger till deterministiska overhead-rader ──
         _apply_overhead_rules(data, pricing_ctx, distance_km, work_days, inside_tolls, job_type or "ovrigt")
+
+        # ── 7b. Backend räknar om work_norms-rader till kronor ──
+        # AI:n missförstår ibland att work_norms.hours_per är timmar (inte kr).
+        # Den här funktionen är sanningen: source_id → hours_per × hourly_rate.
+        _apply_work_norms_pricing(data, pricing_ctx, hourly_rate or 650)
 
         # ── 8. Räkna om totals ──
         data = recalculate_totals(
