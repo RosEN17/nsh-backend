@@ -423,6 +423,8 @@ För material_prices, disposal_costs, equipment_rental: dessa ÄR i kronor.
     - "Stolpe 90×90 tryckimpregnerat" × antal stolpar (var 1,2 m) → material
     - "Räckesspjäla furu 28×70 (set 10st)" × (räckeslängd / 1,2) → material
     - "Räckeshandledare 45×95" × lpm räcke → material
+    - "Räcksspjäla furu 28×70 (set 10st)" × CEIL(räckeslängd / 1.2) set
+      (8–10 spjälor per meter, ett set täcker ca 1,2 lpm)
     - Norm "Räcke 1m hög med spjälor" × lpm räcke → arbete
     Lägg under "Stomme & konstruktion".
 
@@ -439,11 +441,11 @@ För material_prices, disposal_costs, equipment_rental: dessa ÄR i kronor.
      Använd "Frostskyddsmatta under altan" × kvm altanarea.
      Lägg under "Stomme & konstruktion".
 
-[11] Markduk fiberduk — KRÄVS alltid under altanen för ogrässkydd.
-     Använd "Markduk fiberduk 1×25m" × kvm altanarea (beräkna antal rullar).
-     Singel/grus som dränering: "Singel/grus 0–8 storsäck" om ground_type
-     indikerar behov (lera, fuktig mark).
-     Lägg under "Stomme & konstruktion".
+[11] Markduk fiberduk — KRÄVS ALLTID utan undantag.
+     Räkna antal rullar: CEIL(altanarea / 25).
+     Använd "Markduk fiberduk 1×25m" × antal rullar.
+     Typ: material. Lägg under "Stomme & konstruktion".
+     DET ÄR INTE TILLÅTET ATT HOPPA ÖVER DENNA POST.
 
 [12] Pergola/tak — KRÄVS om "pergola", "tak", "solskydd", "carport"
      nämns i beskrivningen.
