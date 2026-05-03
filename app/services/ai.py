@@ -400,11 +400,13 @@ För material_prices, disposal_costs, equipment_rental: dessa ÄR i kronor.
     Norm: "Montering reglar/bärande stomme" × kvm altanarea.
     Lägg under "Stomme & konstruktion".
     
-[5] Altangolv — KRÄVS alltid. Välj material baserat på quality:
-    - Standard: "Trall 28×120 furu impregnerad" ELLER "Trall 28×145 furu impregnerad"
-    - Premium: "Trall 28×145 komposit Trex" ELLER "Trall ek hyvlad 28×120" (lärk)
-    Räkna kvm med 10% spill: quantity = altanarea × 1,10
-    Norm: välj rätt monteringsnorm (standard/composite).
+[5] Altangolv — KRÄVS alltid.
+    - Standard: "Trall 28×120 furu impregnerad"
+    - Premium: "Trall 28×145 komposit Trex" eller "Trall ek hyvlad 28×120" (lärk)
+    Enhet MÅSTE vara lpm — ALDRIG kvm.
+    quantity = ROUND(altanarea × 8,5 × 1,10)
+    Exempel: 24 kvm × 8,5 × 1,10 = 224 lpm
+    Monteringsnorm × kvm altanarea (normen räknas i kvm, materialet i lpm).
     Lägg under "Ytskikt & material".
 
 [6] Trallskruvar — KRÄVS alltid.
