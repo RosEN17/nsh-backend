@@ -223,7 +223,266 @@ EXEMPEL PÅ "assumptions"-text när en punkt skippas:
 OBS: Om underlaget INTE specificerar våningsantal men säger "utan hiss"
 ska du anta minst 2 våningar och flagga antagandet i "assumptions"."""
 
+# ═════════════════════════════════════════════════════════════════════
+# JOBBTYPSSPECIFIK CHECKLISTA — FASAD
+# ═════════════════════════════════════════════════════════════════════
+FASAD_CHECKLIST = """
 
+═══ OBLIGATORISK CHECKLISTA FÖR FASAD ═══
+Detta block gäller för detta jobb (job_type=fasad).
+
+Innan du returnerar JSON-svaret: gå igenom listan nedan. För VARJE punkt
+måste du antingen (a) lägga till motsvarande rad(er) i offerten, eller
+(b) skriva i "assumptions"-arrayen varför punkten inte gäller för
+detta specifika jobb.
+
+DET ÄR INTE TILLÅTET ATT TYST HOPPA ÖVER EN PUNKT.
+
+═══ VIKTIGT OM ENHETER OCH PRISER I work_norms ═══
+work_norms-rader anger TIMMAR per enhet (hours_per), INTE kronor.
+För dessa rader ska du:
+  - Sätt source_id = norm-radens id
+  - Sätt quantity = antal enheter (kvm, lpm, st, post osv.)
+  - Sätt unit_price = 0 och total = 0
+  - Backend räknar AUTOMATISKT om unit_price = hours_per × hourly_rate
+För material_prices, disposal_costs, equipment_rental: dessa ÄR i kronor.
+  - Använd unit_price = postens price-värde direkt.
+
+[1] Etablering & avetablering — backend lägger in detta automatiskt.
+    Skapa INGEN egen rad för etablering eller avetablering.
+    Även om du ser etableringsposter i prislådan: HOPPA ÖVER DEM.
+
+[2] Ställning — KRÄVS alltid på fasadjobb om inte beskrivningen
+    explicit säger "utan ställning" eller "markplan".
+    Räkna ställningsarea = fasadhöjd × husomkrets (eller fasad_area om angiven).
+    Använd rätt post från equipment_rental:
+    - Fasadhöjd ≤ 8 m → "Ställning fasad <8m, första månaden" + ev. "per kvm/månad" om jobbet tar >1 månad
+    - Fasadhöjd > 8 m → "Ställning >8m med bygghiss"
+    Glöm inte "Avetablering ställning" som separat rad om den finns i prislådan.
+    Lägg dessa under kategori "Hyrutrustning".
+
+[3] Demontering hängrännor och stuprör — KRÄVS om hängrännor/stuprör
+    nämns ELLER om det är en komplett fasadrenovering. Använd norm
+    "Demontering hängrännor och stuprör" × lpm husomkrets.
+    Lägg under "Förberedelse".
+
+[4] Vindskydd — KRÄVS på alla fasadjobb med regelfasad eller ny panel.
+    Använd post "Vindskyddspapp standard" eller "Vindskyddspapp Tyvek"
+    (premium om quality=premium). Räkna kvm = fasad_area.
+    Lägg under "Ytskikt & material".
+
+[5] Läkt — KRÄVS när ny panel monteras ovanpå befintlig eller ny regel.
+    Använd "Läkt 22×45 impregnerad" × lpm (räkna c/c 600 mm:
+    lpm läkt ≈ fasad_area / 0,6).
+    Lägg under "Ytskikt & material".
+
+[6] Panel/fasadmaterial — specificera rätt:
+    - Stående panel: "Träpanel 22×120 fingerskarvad gran" eller "Träpanel 22×145 lärk" (premium)
+    - Liggande panel: "Knutbrädor 45×95" + "Träpanel 22×120 fingerskarvad gran"
+    - Ange kvm med 15% spill (quantity = fasad_area × 1,15).
+    Lägg under "Ytskikt & material".
+
+[7] Ytbehandling — KRÄVS om ytbehandling nämns ELLER om det är ny panel.
+    - Grundning: 1 strykning
+    - Täckfärg: normalt 2 strykningar (Falu Rödfärg = 1 strykning)
+    Räkna kvm = fasad_area. Använd norm per strykning.
+    Om kunden valt Fasadfärg/silikatfärg (ej Falu): använd premium-post.
+    Lägg under "Ytskikt & material".
+
+[8] Fönster- och dörranpassningar — KRÄVS om fönster/dörrar finns.
+    Antal fönster och dörrar ska räknas explicit:
+    - "Anpassning runt dörrkarmar" × antal dörrar
+    - "Foder fönster 22×70" × (antal fönster × omkrets per fönster ≈ 5 lpm)
+    - "Knutbrädor 45×95" om liggande panel används
+    Lägg under "Ytskikt & material".
+
+[9] Hängrännor och stuprör — KRÄVS om gamla demonterades (punkt 3)
+    eller om kunden vill ha nya. Ange:
+    - "Hängrännor stål 5m" × antal lpm husomkrets / 5
+    - "Stuprör stål 3m" × antal (1 per hörn, minst 2)
+    Lägg under "Ytskikt & material".
+
+[10] Skruvförbrukning och småvaror — KRÄVS alltid.
+     Använd post "Skruv förbrukning + småvaror" som fast post.
+     Lägg under "Ytskikt & material".
+
+[11] Förbrukningsmaterial per dag — KRÄVS alltid.
+     Penslar, rollers, skyddsutrustning, maskeringstejp etc.
+     Räkna ~350 kr per arbetare per dag.
+     Sök efter "Förbrukningspaket fasad per dag" i prislådan.
+     Lägg under "Förberedelse".
+
+[12] Frakt material — KRÄVS om material_total > 15 000 kr.
+     Backend lägger in detta automatiskt från overhead_costs om
+     trigger_rule = "fasad OR material_total>15000" matchar.
+     Skapa INGEN egen rad för frakt.
+
+[13] Slutbesiktning med kund — KRÄVS alltid.
+     Använd norm "Slutbesiktning med kund" × 1 post.
+     Lägg under "Efterarbete".
+
+[14] Plastning och skydd ytor och inventarier — KRÄVS om målning ingår.
+     Använd norm "Plastning skydd ytor och inventarier" × kvm fasadarea.
+     Lägg under "Förberedelse".
+
+[15] Resor och trängselskatt — backend räknar AUTOMATISKT.
+     Skapa INGEN egen rad för resor eller trängselskatt.
+
+EXEMPEL PÅ "assumptions"-text när en punkt skippas:
+- "Punkt 2 (ställning) skippad: markplan, stege räcker"
+- "Punkt 3 (hängrännor demontering) skippad: befintliga hängrännor behålls"
+- "Punkt 9 (nya hängrännor) skippad: kunden beställer separat"
+- "Punkt 7 (ytbehandling) skippad: råspont levereras färdigbehandlad"
+
+AREALBERÄKNING — SÅ HÄR RÄKNAR DU:
+Om facade_area är angiven: använd den direkt.
+Om INTE angiven men perimeter och facade_height finns:
+  fasad_area = perimeter × facade_height
+  Dra bort fönster och dörrar: fasad_area_netto = fasad_area − (antal_fönster × 1,5) − (antal_dörrar × 2,0)
+Redovisa alltid din beräkning i job_summary."""
+
+
+# ═════════════════════════════════════════════════════════════════════
+# JOBBTYPSSPECIFIK CHECKLISTA — ALTAN
+# ═════════════════════════════════════════════════════════════════════
+ALTAN_CHECKLIST = """
+
+═══ OBLIGATORISK CHECKLISTA FÖR ALTAN/TRALL ═══
+Detta block gäller för detta jobb (job_type=altan).
+
+Innan du returnerar JSON-svaret: gå igenom listan nedan. För VARJE punkt
+måste du antingen (a) lägga till motsvarande rad(er) i offerten, eller
+(b) skriva i "assumptions"-arrayen varför punkten inte gäller för
+detta specifika jobb.
+
+DET ÄR INTE TILLÅTET ATT TYST HOPPA ÖVER EN PUNKT.
+
+═══ VIKTIGT OM ENHETER OCH PRISER I work_norms ═══
+work_norms-rader anger TIMMAR per enhet (hours_per), INTE kronor.
+För dessa rader ska du:
+  - Sätt source_id = norm-radens id
+  - Sätt quantity = antal enheter (kvm, lpm, st, post osv.)
+  - Sätt unit_price = 0 och total = 0
+  - Backend räknar AUTOMATISKT om unit_price = hours_per × hourly_rate
+För material_prices, disposal_costs, equipment_rental: dessa ÄR i kronor.
+  - Använd unit_price = postens price-värde direkt.
+
+[1] Etablering & avetablering — backend lägger in detta automatiskt.
+    Skapa INGEN egen rad för etablering eller avetablering.
+    Även om du ser etableringsposter i prislådan: HOPPA ÖVER DEM.
+
+[2] Markförberedelse och grundläggning — KRÄVS alltid.
+    Välj rätt grundningsmetod baserat på ground_type och altan_height:
+    - Betongplintar (vanligast, markplan): norm "Sätta betongplint på fast mark" × antal plintar
+      Räkna antal plintar: en plint per 1,2 m längs reglar, c/c 1,2 m.
+      Formel: antal plintar ≈ (altanbredd / 1,2) × (altanlängd / 1,2)
+    - Krinner skruvplintar (om ground_type=lös jord/lera/svag bärighet ELLER
+      altan_height > 0,6 m): norm "Sätta plintar Krinner skruvplint" × antal
+      + material "Plint Krinner M65 skruvplint" × antal
+    - Gjuten plintfundament (om altan_height > 1,2 m ELLER tung konstruktion):
+      norm "Gjuta plintfundament" × antal
+    Lägg grundläggning under "Stomme & konstruktion".
+
+[3] Rivning/borttagning av befintlig altan — KRÄVS om "byta ut",
+    "ta bort", "riva befintlig" nämns i beskrivningen.
+    Använd norm för rivning av altangolv × kvm.
+    Lägg under "Rivning". Glöm inte container om det är stora volymer.
+
+[4] Reglar och bärande stomme — KRÄVS alltid.
+    Välj material baserat på quality och altan_height:
+    - Standard: "Regel 45x95 tryckimpregnerat" × lpm
+      Räkna lpm reglar: (altanlängd / 0,6) × altanbredd + 2 × altanomkrets (kantreglar)
+    - Bjälkar vid höga altaner (>0,8 m): "Bjälke 45x195 impregnerad" × lpm
+    Norm: "Montering reglar/bärande stomme" × kvm altanarea.
+    Lägg under "Stomme & konstruktion".
+
+[5] Altangolv — KRÄVS alltid. Välj material baserat på quality:
+    - Standard: "Trall 28×120 furu impregnerad" ELLER "Trall 28×145 furu impregnerad"
+    - Premium: "Trall 28×145 komposit Trex" ELLER "Trall ek hyvlad 28×120" (lärk)
+    Räkna kvm med 10% spill: quantity = altanarea × 1,10
+    Norm: välj rätt monteringsnorm (standard/composite).
+    Lägg under "Ytskikt & material".
+
+[6] Trallskruvar — KRÄVS alltid.
+    Använd "Trallskruv rostfri 5×55 (250st)" — räkna 1 förpackning per 3 kvm.
+    Lägg under "Ytskikt & material".
+
+[7] Avslutande fascia och kantbrädor — KRÄVS alltid.
+    Använd "Träpanel 22×120 fingerskarvad gran" eller anpassat kantbräde.
+    Räkna lpm = altanomkrets (2 × bredd + 2 × längd).
+    Norm: "Snickeriarbete fascia och avslut" × lpm.
+    Lägg under "Ytskikt & material".
+
+[8] Räcke — KRÄVS om:
+    - altan_height > 0,5 m (krav enligt BBR), ELLER
+    - "räcke" nämns i beskrivningen eller build_params
+    Räkna räckeslängd = railing (om angett) ELLER altanomkrets minus husväggen.
+    Inkludera:
+    - "Stolpe 90×90 tryckimpregnerat" × antal stolpar (var 1,2 m) → material
+    - "Räckesspjäla furu 28×70 (set 10st)" × (räckeslängd / 1,2) → material
+    - "Räckeshandledare 45×95" × lpm räcke → material
+    - Norm "Räcke 1m hög med spjälor" × lpm räcke → arbete
+    Lägg under "Stomme & konstruktion".
+
+[9] Trappa — KRÄVS om "trappa" nämns ELLER om altan_height > 0,4 m
+    och ingen befintlig trappa finns.
+    Välj norm baserat på antal steg:
+    - "Trapp 3 steg med vångstycke" × 1 post (om ≤ 3 steg)
+    - "Trapp 5 steg med vångstycke" × 1 post (om 4–5 steg)
+    Material: "Trall 28×145 furu impregnerad" för stegbrädor × lpm.
+    Lägg under "Stomme & konstruktion".
+
+[10] Frostskyddsmatta under altan — KRÄVS om altan_height < 0,4 m
+     (krypgrund-risk) ELLER om ground_type nämner lera/fukt.
+     Använd "Frostskyddsmatta under altan" × kvm altanarea.
+     Lägg under "Stomme & konstruktion".
+
+[11] Markduk fiberduk — KRÄVS alltid under altanen för ogrässkydd.
+     Använd "Markduk fiberduk 1×25m" × kvm altanarea (beräkna antal rullar).
+     Singel/grus som dränering: "Singel/grus 0–8 storsäck" om ground_type
+     indikerar behov (lera, fuktig mark).
+     Lägg under "Stomme & konstruktion".
+
+[12] Pergola/tak — KRÄVS om "pergola", "tak", "solskydd", "carport"
+     nämns i beskrivningen.
+     Norm: "Pergola tak inkl. reglar" × kvm.
+     Material: "OSB-skiva 18mm 244×122" × antal skivor om tätt tak.
+     Lägg under "Stomme & konstruktion".
+
+[13] Skruv förbrukning och småvaror — KRÄVS alltid.
+     Justeringsbeslag, vinkelbeslag, skruvar för stomme.
+     Använd "Skruv förbrukning + småvaror" som fast post.
+     Lägg under "Ytskikt & material".
+
+[14] Jordborr — KRÄVS om Krinner-plintar används ELLER altan_height > 0,8 m.
+     Använd "Jordborr Bokay till plintar" från equipment_rental × antal dagar.
+     Lägg under "Hyrutrustning".
+
+[15] Slutbesiktning med kund — KRÄVS alltid.
+     Norm "Slutbesiktning med kund" × 1 post.
+     Lägg under "Efterarbete".
+
+[16] Plastning och skydd ytor — KRÄVS om altanen byggs intill hus
+     med känsliga ytor (puts, panel, fönster nära).
+     Norm "Plastning skydd ytor och inventarier" × lpm husfasad.
+     Lägg under "Förberedelse".
+
+[17] Resor och trängselskatt — backend räknar AUTOMATISKT.
+     Skapa INGEN egen rad för resor eller trängselskatt.
+
+MÅTTBERÄKNING — SÅ HÄR RÄKNAR DU:
+Om altan_dimensions är angiven (B×L i meter):
+  altanarea = B × L
+  altanomkrets = 2 × (B + L)
+Om INTE angiven men floor_sqm finns: använd floor_sqm som altanarea.
+Redovisa alltid din beräkning i job_summary, t.ex.:
+  "Altan 4,0 × 6,0 m = 24 kvm. Omk. 20 lpm. Höjd 0,8 m → räcke krävs."
+
+MATERIALVAL — SNABBGUIDE:
+  Standard + låg höjd (<0,5m): furu impregnerad + betongplintar
+  Standard + medelhöjd (0,5–1,2m): furu impregnerad + Krinner
+  Premium oavsett: komposit eller lärk + Krinner eller gjutna plintar
+  Hög höjd (>1,2m): alltid gjutna plintar + bjälkar 45×195"""
 
 # ═════════════════════════════════════════════════════════════════════
 # Hämta prislådan från Supabase via RPC
