@@ -783,7 +783,8 @@ def _apply_overhead_rules(
         trigger = o.get("trigger_rule") or ""
 
         # Resor
-        if calc == "per_km_round_trip" and distance_km and work_days:
+        effective_work_days = work_days or data.get("estimated_days") or 3
+        if calc == "per_km_round_trip" and distance_km and effective_work_days:
             total = round(distance_km * 2 * rate * work_days)
             overhead_rows.append({
                 "description": o["label"],
@@ -797,9 +798,10 @@ def _apply_overhead_rules(
             })
 
         # Trängselskatt
-        elif calc == "congestion_per_workday" and work_days:
+        elif calc == "congestion_per_workday" and effective_work_days:
             if inside_tolls and trigger == f"inside_tolls={inside_tolls}":
-                total = round(rate * work_days)
+                total = round(rate * effective_work_days)
+     
                 overhead_rows.append({
                     "description": o["label"],
                     "note":        f"{rate}kr × {work_days} arbetsdagar innanför tullarna",
