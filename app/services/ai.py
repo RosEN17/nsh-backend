@@ -851,8 +851,7 @@ def _apply_overhead_rules(
                     "type":   "overhead",
                     "source_id":  o["id"],
                 })
-
-     if overhead_rows:
+if overhead_rows:
         # Ta bort AI:ns etableringsrader helt — backend har alltid sista ordet
         data["categories"] = [
             c for c in data.get("categories", [])
@@ -864,8 +863,6 @@ def _apply_overhead_rules(
             "rows": overhead_rows,
             "subtotal": sum(r["total"] for r in overhead_rows),
         })
-
-
 def _apply_work_norms_pricing(
     data: dict,
     pricing_ctx: dict,
