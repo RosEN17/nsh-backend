@@ -129,6 +129,95 @@ OBS: "totals" och "meta" lämnas tomma — backend räknar deterministiskt."""
 
 
 # ═════════════════════════════════════════════════════════════════════
+# JOBBTYPSSPECIFIK CHECKLISTA — RIVNING
+# ═════════════════════════════════════════════════════════════════════
+# Detta block injekteras till SYSTEM_PROMPT_BASE endast när
+# job_type == "rivning". Syftet är att tvinga AI:n att aktivt resonera
+# kring de poster som tidigare tyst utelämnats (förbrukningsmaterial,
+# bär-tillägg, skyddstäckning trapphus, deponi, etc.).
+#
+# Lägg till motsvarande checklistor för "fasad" och "altan" när
+# respektive prislåda är auditerad.
+RIVNING_CHECKLIST = """
+
+═══ OBLIGATORISK CHECKLISTA FÖR RIVNING ═══
+Detta block gäller för detta jobb (job_type=rivning).
+
+Innan du returnerar JSON-svaret: gå igenom listan nedan. För VARJE punkt
+måste du antingen (a) lägga till motsvarande rad(er) i offerten, eller
+(b) skriva i "assumptions"-arrayen varför punkten inte gäller för
+detta specifika jobb.
+
+DET ÄR INTE TILLÅTET ATT TYST HOPPA ÖVER EN PUNKT.
+
+REGEL OM PRISLÅDA: Sök i prislådan FÖRST. Hittar du matchande post:
+använd dess id som source_id. Hittar du INGEN matchande post:
+lägg raden ändå med source_id="ESTIMATED" och din bästa uppskattning.
+Det är BÄTTRE att gissa och flagga ESTIMATED än att utelämna posten.
+
+[1] Etablering & avetablering — backend lägger in detta automatiskt
+    från overhead_costs. Skapa INGEN egen rad för dessa.
+
+[2] Förbrukningsmaterial (sågblad, slipskivor, skyddsutrustning,
+    säckar, tejp). Räkna ~350 kr per arbetare per dag.
+    Lägg som type="material" i kategori "Förberedelse" eller
+    "Ytskikt & material". Sök i prislådan efter "Förbrukningspaket
+    rivning per dag" — finns den, använd den. Annars ESTIMATED.
+
+[3] Skyddstäckning trapphus — KRÄVS alltid när rivning sker i
+    flerbostadshus, BRF, hyreshus, eller när description nämner
+    "lägenhet", "vån", "trapphus", "BRF". Lägg två rader:
+    - Arbete: norm "Skyddstäckning trapphus per våningsplan"
+      × antal våningsplan från entré till lägenheten
+    - Material: post "Skyddstäckning trapphus — material"
+
+[4] Bär-tillägg — KRÄVS när ground_type ELLER description innehåller
+    något av: "utan hiss", "X tr", "X vån", "trappa", "ej hiss".
+    Använd norm "Bär-tillägg per m³ avfall per våning utan hiss".
+    Räkna: demolition_volume × antal våningar × normens hours_per.
+    Exempel: 12 m³ × 4 vån × 0,25 h = 12 timmar.
+
+[5] Container för avfall — minst 1 st. Vid demolition_volume > 10 m³
+    behövs antingen 2 vändor av 10 m³, eller en 15 m³.
+
+[6] Deponi-kostnad i ton. Konvertera från demolition_volume med
+    densitetsfaktor:
+    - Kakel/klinker/betong/bruk: 1,8–2,0 ton/m³ → "Deponi tungt rivningsavfall"
+    - Blandat (kök+inredning): 1,1–1,3 ton/m³ → "Deponi blandat rivningsavfall"
+    - Mest gips/trä: 0,3–0,5 ton/m³ → "Deponi blandat rivningsavfall"
+    Det får ALDRIG saknas en deponi-rad på ett rivningsjobb.
+
+[7] Hyrutrustning — minst följande på alla rivningsjobb:
+    - Mejselhammare/bilningshammare (om kakel/klinker/betong rivs)
+    - Industridammsugare M-klass (alltid)
+    - Luftrenare HEPA (om dammsanering nämns ELLER flerbostadshus
+      ELLER BRF nämns i underlaget)
+
+[8] Demontering vitvaror varsamt — separat rad om vitvaror nämns
+    specifikt (kunden behåller, säljer, skänker bort, "demonteras
+    varsamt"). Använd norm "Demontering vitvaror varsamt per styck".
+    Om vitvaror endast ska rivas/slängas: räkna som del av
+    "Rivning köksinredning komplett".
+
+[9] Slutrengöring efter rivning — KRÄVS på alla rivningsjobb.
+    Använd norm "Slutrengöring efter rivning per m²" × rivningsyta.
+
+[10] Resor och trängselskatt — backend räknar AUTOMATISKT från
+     distance_km, work_days och adress (overhead_costs med
+     calc_type=per_km_round_trip och congestion_per_workday).
+     Skapa INGEN egen rad för resor eller trängselskatt.
+
+EXEMPEL PÅ "assumptions"-text när en punkt skippas:
+- "Punkt 4 (bär-tillägg) skippad: hiss finns enligt underlag"
+- "Punkt 8 (demontering vitvaror) skippad: kunden vill att vi slänger allt"
+- "Punkt 3 (skyddstäckning) skippad: rivning sker i fristående hus"
+
+OBS: Om underlaget INTE specificerar våningsantal men säger "utan hiss"
+ska du anta minst 2 våningar och flagga antagandet i "assumptions"."""
+
+
+
+# ═════════════════════════════════════════════════════════════════════
 # Hämta prislådan från Supabase via RPC
 # ═════════════════════════════════════════════════════════════════════
 async def fetch_pricing_context(
@@ -698,8 +787,11 @@ async def generate_estimate(
         region=region,
     )
 
-    # ── 4. Bygg system-prompt med prislåda ──
-    system = SYSTEM_PROMPT_BASE + _format_pricing_for_prompt(pricing_ctx)
+    # ── 4. Bygg system-prompt med prislåda + jobbtypsspecifik checklista ──
+    system = SYSTEM_PROMPT_BASE
+    if (job_type or "").lower() == "rivning":
+        system += RIVNING_CHECKLIST
+    system += _format_pricing_for_prompt(pricing_ctx)
 
     # ── 5. Bygg user-text ──
     user_text = _build_user_text(
