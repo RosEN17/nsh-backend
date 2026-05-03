@@ -768,6 +768,9 @@ def _apply_overhead_rules(
     """
     overhead_rows = []
 
+    # Räkna ut effektiva arbetsdagar — använd work_days, sen AI:ns estimat, sen fallback 3
+    effective_work_days = int(work_days or data.get("estimated_days") or 3)
+
     # Räkna materialsumma för frakt-trigger
     material_total = 0.0
     for cat in data.get("categories", []):
@@ -783,12 +786,11 @@ def _apply_overhead_rules(
         trigger = o.get("trigger_rule") or ""
 
         # Resor
-        effective_work_days = work_days or data.get("estimated_days") or 3
         if calc == "per_km_round_trip" and distance_km and effective_work_days:
-            total = round(distance_km * 2 * rate * work_days)
+            total = round(distance_km * 2 * rate * effective_work_days)
             overhead_rows.append({
                 "description": o["label"],
-                "note":        f"{distance_km}km × 2 × {rate}kr × {work_days} resedagar",
+                "note":        f"{distance_km}km × 2 × {rate}kr × {effective_work_days} resedagar",
                 "unit":        "km",
                 "quantity":    1,
                 "unit_price":  total,
@@ -801,12 +803,11 @@ def _apply_overhead_rules(
         elif calc == "congestion_per_workday" and effective_work_days:
             if inside_tolls and trigger == f"inside_tolls={inside_tolls}":
                 total = round(rate * effective_work_days)
-     
                 overhead_rows.append({
                     "description": o["label"],
-                    "note":        f"{rate}kr × {work_days} arbetsdagar innanför tullarna",
+                    "note":        f"{rate}kr × {effective_work_days} arbetsdagar innanför tullarna",
                     "unit":        "dag",
-                    "quantity":    work_days,
+                    "quantity":    effective_work_days,
                     "unit_price":  round(rate),
                     "total":       total,
                     "type":        "overhead",
@@ -845,7 +846,6 @@ def _apply_overhead_rules(
             "rows":     overhead_rows,
             "subtotal": sum(r["total"] for r in overhead_rows),
         })
-
 
 # ═════════════════════════════════════════════════════════════════════
 # Räkna om work_norms-rader till kronor
