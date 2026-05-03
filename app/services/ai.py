@@ -171,12 +171,12 @@ Det är BÄTTRE att gissa och flagga ESTIMATED än att utelämna posten.
     "Ytskikt & material". Sök i prislådan efter "Förbrukningspaket
     rivning per dag" — finns den, använd den. Annars ESTIMATED.
 
-[3] Skyddstäckning trapphus — KRÄVS alltid när rivning sker i
-    flerbostadshus, BRF, hyreshus, eller när description nämner
-    "lägenhet", "vån", "trapphus", "BRF". Lägg två rader:
-    - Arbete: norm "Skyddstäckning trapphus per våningsplan"
-      × antal våningsplan från entré till lägenheten
-    - Material: post "Skyddstäckning trapphus — material"
+[3] Skyddstäckning trapphus — KRÄVS ALLTID när description innehåller
+    "flerbostadshus", "BRF", "tr", "utan hiss" eller "våning".
+    Det är INTE TILLÅTET att hoppa över denna punkt utan explicit
+    motivering i assumptions. Lägg ALLTID med dessa två rader:
+    - Arbete: norm "Skyddstäckning trapphus per våningsplan" × antal våningar
+    - Material: post "Skyddstäckning trapphus — material" × 1 post
 
 [4] Bär-tillägg — KRÄVS när ground_type ELLER description innehåller
     något av: "utan hiss", "X tr", "X vån", "trappa", "ej hiss".
