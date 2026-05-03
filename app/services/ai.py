@@ -126,18 +126,28 @@ Hoppa ALDRIG över ett moment som står där.
 OBS: "totals" och "meta" lämnas tomma — backend räknar deterministiskt.
 OBS: Skapa ALDRIG kategorin "Etablering & resa" — backend lägger in den automatiskt."""
 
+
+
+# ═════════════════════════════════════════════════════════════════════
+# JOBBTYPSSPECIFIK CHECKLISTA — RIVNING
+# ═════════════════════════════════════════════════════════════════════
+# Detta block injekteras till SYSTEM_PROMPT_BASE endast när
+# job_type == "rivning". Lägg till motsvarande checklistor för "fasad"
+# och "altan" när respektive prislåda är auditerad.
 RIVNING_CHECKLIST = """
 
 ═══ OBLIGATORISK CHECKLISTA FÖR RIVNING ═══
 Detta block gäller för detta jobb (job_type=rivning).
 
-Gå igenom listan nedan. För VARJE punkt måste du antingen
-(a) lägga till motsvarande rad(er) i offerten, eller
-(b) skriva i "assumptions"-arrayen varför punkten inte gäller.
+Innan du returnerar JSON-svaret: gå igenom listan nedan. För VARJE punkt
+måste du antingen (a) lägga till motsvarande rad(er) i offerten, eller
+(b) skriva i "assumptions"-arrayen varför punkten inte gäller för
+detta specifika jobb.
+
 DET ÄR INTE TILLÅTET ATT TYST HOPPA ÖVER EN PUNKT.
 
-═══ VIKTIGT OM work_norms ═══
-work_norms anger TIMMAR per enhet (hours_per), INTE kronor.
+═══ VIKTIGT OM ENHETER OCH PRISER I work_norms ═══
+work_norms-rader anger TIMMAR per enhet (hours_per), INTE kronor.
 För dessa rader ska du:
   - Sätt source_id = norm-radens id
   - Sätt quantity = antal enheter (vån, m², st, post osv.)
@@ -151,14 +161,15 @@ använd dess id som source_id. Hittar du INGEN matchande post:
 lägg raden ändå med source_id="ESTIMATED" och din bästa uppskattning.
 Det är BÄTTRE att gissa och flagga ESTIMATED än att utelämna posten.
 
-[1] Etablering & avetablering — backend lägger in automatiskt.
-    Skapa INGEN egen rad. Skapa INTE kategorin "Etablering & resa".
+[1] Etablering & avetablering — backend lägger in detta automatiskt
+    från overhead_costs. Skapa INGEN egen rad för dessa.
+    Även om du ser etableringsposter i prislådan: HOPPA ÖVER DEM.
 
 [2] Förbrukningsmaterial (sågblad, slipskivor, skyddsutrustning,
     säckar, tejp). Räkna ~350 kr per arbetare per dag.
-    Lägg som type="material" i kategori "Förberedelse".
-    Sök i prislådan efter "Förbrukningspaket rivning per dag" — finns den,
-    använd den. Annars ESTIMATED.
+    Lägg som type="material" i kategori "Förberedelse" eller
+    "Ytskikt & material". Sök i prislådan efter "Förbrukningspaket
+    rivning per dag" — finns den, använd den. Annars ESTIMATED.
 
 [3] Skyddstäckning trapphus — KRÄVS alltid när rivning sker i
     flerbostadshus, BRF, hyreshus, eller när description nämner
@@ -171,51 +182,47 @@ Det är BÄTTRE att gissa och flagga ESTIMATED än att utelämna posten.
     något av: "utan hiss", "X tr", "X vån", "trappa", "ej hiss".
     Använd norm "Bär-tillägg per m³ avfall per våning utan hiss".
     Sätt quantity = demolition_volume × antal våningar.
-    Exempel: 12 m³ × 4 vån = 48 enheter.
-    Om underlaget INTE specificerar våningsantal men säger "utan hiss":
-    anta minst 2 våningar och flagga i "assumptions".
+    Exempel: 12 m³ × 4 vån = 48 enheter (backend multiplicerar
+    sedan med hours_per och hourly_rate).
 
-[5] Container för avfall — minst 1 st.
-    Vid demolition_volume > 10 m³: välj 15 m³ eller 2 vändor av 10 m³.
-    Sök i disposal_costs efter rätt containerstorlek.
+[5] Container för avfall — minst 1 st. Vid demolition_volume > 10 m³
+    behövs antingen 2 vändor av 10 m³, eller en 15 m³.
 
-[6] Deponi-kostnad i ton — KRÄVS ALLTID. Det får ALDRIG saknas
-    en deponi-rad på ett rivningsjobb.
-    Konvertera från demolition_volume med densitetsfaktor:
-    - Kakel/klinker/betong/bruk: 1,8–2,0 ton/m³ → tungt rivningsavfall
-    - Blandat (kök+inredning): 1,1–1,3 ton/m³ → blandat rivningsavfall
-    - Mest gips/trä: 0,3–0,5 ton/m³ → blandat rivningsavfall
+[6] Deponi-kostnad i ton. Konvertera från demolition_volume med
+    densitetsfaktor:
+    - Kakel/klinker/betong/bruk: 1,8–2,0 ton/m³ → "Deponi tungt rivningsavfall"
+    - Blandat (kök+inredning): 1,1–1,3 ton/m³ → "Deponi blandat rivningsavfall"
+    - Mest gips/trä: 0,3–0,5 ton/m³ → "Deponi blandat rivningsavfall"
+    Det får ALDRIG saknas en deponi-rad på ett rivningsjobb.
 
-[7] Hyrutrustning — lägg med minst följande:
-    - Mejselhammare/bilningshammare: om kakel/klinker/betong rivs
-    - Industridammsugare M-klass: ALLTID
-    - Luftrenare HEPA: om dammsanering nämns ELLER flerbostadshus/BRF
-    - Slipmaskin: om golvsliping ingår
-    Sök i equipment_rental efter varje post.
+[7] Hyrutrustning — minst följande på alla rivningsjobb:
+    - Mejselhammare/bilningshammare (om kakel/klinker/betong rivs)
+    - Industridammsugare M-klass (alltid)
+    - Luftrenare HEPA (om dammsanering nämns ELLER flerbostadshus
+      ELLER BRF nämns i underlaget)
 
-[8] Demontering vitvaror varsamt — separat rad ENDAST om vitvaror nämns
-    specifikt och kunden behåller/säljer/skänker bort dem.
-    Använd norm "Demontering vitvaror varsamt per styck" × antal.
-    Om vitvaror ska slängas: räkna dem som del av rivningskostnaden.
+[8] Demontering vitvaror varsamt — separat rad om vitvaror nämns
+    specifikt (kunden behåller, säljer, skänker bort, "demonteras
+    varsamt"). Använd norm "Demontering vitvaror varsamt per styck".
+    Om vitvaror endast ska rivas/slängas: räkna som del av
+    "Rivning köksinredning komplett".
 
 [9] Slutrengöring efter rivning — KRÄVS på alla rivningsjobb.
     Använd norm "Slutrengöring efter rivning per m²" × rivningsyta.
-    Lägg under "Efterarbete".
 
-[10] Plastning och skydd av kvarvarande ytor — KRÄVS om delar av
-     lokalen/lägenheten inte rivs och måste skyddas.
-     Norm "Plastning skydd ytor och inventarier" × kvm skyddsyta.
-     Lägg under "Förberedelse".
-
-[11] Resor och trängselskatt — backend räknar AUTOMATISKT från
-     distance_km, work_days och adress.
+[10] Resor och trängselskatt — backend räknar AUTOMATISKT från
+     distance_km, work_days och adress (overhead_costs med
+     calc_type=per_km_round_trip och congestion_per_workday).
      Skapa INGEN egen rad för resor eller trängselskatt.
 
 EXEMPEL PÅ "assumptions"-text när en punkt skippas:
 - "Punkt 4 (bär-tillägg) skippad: hiss finns enligt underlag"
 - "Punkt 8 (demontering vitvaror) skippad: kunden vill att vi slänger allt"
-- "Punkt 3 (skyddstäckning) skippad: rivning sker i fristående villa"
-- "Punkt 7 (luftrenare HEPA) skippad: fristående hus, ej BRF" """
+- "Punkt 3 (skyddstäckning) skippad: rivning sker i fristående hus"
+
+OBS: Om underlaget INTE specificerar våningsantal men säger "utan hiss"
+ska du anta minst 2 våningar och flagga antagandet i "assumptions"."""
+
 # ═════════════════════════════════════════════════════════════════════
 # JOBBTYPSSPECIFIK CHECKLISTA — FASAD
 # ═════════════════════════════════════════════════════════════════════
