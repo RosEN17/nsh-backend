@@ -290,10 +290,17 @@ För material_prices, disposal_costs, equipment_rental: dessa ÄR i kronor.
     Lägg under "Ytskikt & material".
 
 [7] Ytbehandling — KRÄVS om ytbehandling nämns ELLER om det är ny panel.
-    - Grundning: 1 strykning
-    - Täckfärg: normalt 2 strykningar (Falu Rödfärg = 1 strykning)
-    Räkna kvm = fasad_area. Använd norm per strykning.
-    Om kunden valt Fasadfärg/silikatfärg (ej Falu): använd premium-post.
+    Räkna kvm = fasad_area_netto.
+    LITERBERÄKNING: fasad_area_netto ÷ 8 kvm/liter = liter per lager.
+    - Grundning: 1 lager → fasad_area_netto ÷ 8 liter
+    - Täckfärg (Falufärg): 1 lager → fasad_area_netto ÷ 8 liter
+    - Täckfärg (övriga): 2 lager → (fasad_area_netto ÷ 8) × 2 liter
+    - Silikatfärg (premium): 2 lager → (fasad_area_netto ÷ 8) × 2 liter
+    Exempel: 80 kvm fasad, Falufärg:
+      Grundning: 80 ÷ 8 = 10 liter
+      Täckfärg:  80 ÷ 8 = 10 liter (1 lager)
+    Använd "Grundolja Linolja" eller "Grundolja träpanel" för grundning.
+    Använd "Falu Rödfärg" eller "Täckfärg silikat" för täckfärg.
     Lägg under "Ytskikt & material".
 
 [8] Fönster- och dörranpassningar — KRÄVS om fönster/dörrar finns.
@@ -467,6 +474,14 @@ För material_prices, disposal_costs, equipment_rental: dessa ÄR i kronor.
      Använd "Skruv förbrukning + småvaror" som fast post.
      Lägg under "Ytskikt & material".
 
+[13b] Ytbehandling trall — KRÄVS om "olja", "behandla", "ytbehandling" nämns
+      ELLER om ny trall monteras (ny trall ska alltid behandlas).
+      Räkna: altanarea × 2 lager ÷ 8 kvm/liter = antal liter.
+      Exempel: 24 kvm × 2 ÷ 8 = 6 liter träolja.
+      - Standard: "Flügger Wood Oil Classic träolja" × liter
+      - Premium: "Flügger 2in1 Wood Tex Classic trälasyr" × liter
+      Lägg under "Ytskikt & material".
+      
 [14] Jordborr — KRÄVS om Krinner-plintar används ELLER altan_height > 0,8 m.
      Använd "Jordborr Bokay till plintar" från equipment_rental × antal dagar.
      Lägg under "Hyrutrustning".
